@@ -1,0 +1,439 @@
+#!/usr/bin/env python3
+"""Explore polygon tilings by depth-first boundary growth.
+
+The search starts with one tile, then repeatedly chooses an exposed boundary
+edge of the current patch and tries to attach a fresh copy of the input polygon
+by making one of its edges collinear in the opposite direction and sharing one
+endpoint.  Each accepted DFS state is exported as a PNG.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Iterable
+
+from PIL import Image, ImageDraw, ImageFont
+from shapely.geometry import GeometryCollection, LineString, MultiLineString, MultiPolygon, Point as ShapelyPoint, Polygon
+from shapely.ops import snap, unary_union
+
+
+SQRT3 = math.sqrt(3.0)
+
+
+Point = tuple[float, float]
+
+
+@dataclass(frozen=True)
+class Tile:
+    points: tuple[Point, ...]
+    reflected: bool = False
+
+
+@dataclass(frozen=True)
+class State:
+    tiles: tuple[Tile, ...]
+    depth: int
+    path_keys: frozenset[tuple[tuple[tuple[float, float], ...], ...]]
+
+
+def preset_polygon(name: str) -> tuple[Point, ...]:
+    if name == "square":
+        return ((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0))
+
+    if name == "tile11":
+        return (
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (1.5, -SQRT3 / 2.0),
+            (1.5 + SQRT3 / 2.0, 0.5 - SQRT3 / 2.0),
+            (1.5 + SQRT3 / 2.0, 1.5 - SQRT3 / 2.0),
+            (2.5 + SQRT3 / 2.0, 1.5 - SQRT3 / 2.0),
+            (3.0 + SQRT3 / 2.0, 1.5),
+            (3.0, 2.0),
+            (3.0 - SQRT3 / 2.0, 1.5),
+            (2.5 - SQRT3 / 2.0, 1.5 + SQRT3 / 2.0),
+            (1.5 - SQRT3 / 2.0, 1.5 + SQRT3 / 2.0),
+            (0.5 - SQRT3 / 2.0, 1.5 + SQRT3 / 2.0),
+            (-SQRT3 / 2.0, 1.5),
+            (0.0, 1.0),
+        )
+
+    if name == "hat":
+        def hex_point(x: float, y: float) -> Point:
+            return (x + 0.5 * y, -SQRT3 * y / 2.0)
+
+        return tuple(
+            hex_point(x, y)
+            for x, y in (
+                (-1, 2),
+                (0, 2),
+                (0, 3),
+                (2, 2),
+                (3, 0),
+                (4, 0),
+                (5, -1),
+                (4, -2),
+                (2, -1),
+                (2, -2),
+                (1, -2),
+                (0, -2),
+                (-1, -1),
+                (0, 0),
+            )
+        )
+
+    raise ValueError(f"Unknown preset: {name}")
+
+
+def load_polygon(path: Path) -> tuple[Point, ...]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, list) or len(data) < 3:
+        raise SystemExit("Polygon JSON must be a list of at least three [x, y] points.")
+
+    points = []
+    for item in data:
+        if not isinstance(item, list) or len(item) != 2:
+            raise SystemExit("Polygon JSON points must have the form [x, y].")
+        points.append((float(item[0]), float(item[1])))
+    return tuple(points)
+
+
+def normalize_base(points: tuple[Point, ...]) -> tuple[Point, ...]:
+    polygon = Polygon(points)
+    if not polygon.is_valid or polygon.area <= 0:
+        raise SystemExit("Input polygon must be valid and have positive area.")
+
+    cx, cy = polygon.centroid.x, polygon.centroid.y
+    return tuple((x - cx, y - cy) for x, y in points)
+
+
+def edges(points: tuple[Point, ...]) -> Iterable[tuple[Point, Point]]:
+    yield from zip(points, points[1:] + points[:1])
+
+
+def rotate_point(point: Point, angle: float) -> Point:
+    x, y = point
+    c = math.cos(angle)
+    s = math.sin(angle)
+    return (c * x - s * y, s * x + c * y)
+
+
+def transform_points(points: tuple[Point, ...], reflected: bool, angle: float, dx: float, dy: float) -> tuple[Point, ...]:
+    reflected_points = tuple((-x, y) for x, y in points) if reflected else points
+    return tuple((rx + dx, ry + dy) for rx, ry in (rotate_point(point, angle) for point in reflected_points))
+
+
+def boundary_segments(patch) -> list[tuple[Point, Point]]:
+    raw_segments: list[tuple[Point, Point]] = []
+
+    def add_line(line: LineString) -> None:
+        coords = list(line.coords)
+        for a, b in zip(coords, coords[1:]):
+            if math.dist(a, b) > 1e-8:
+                raw_segments.append(((float(a[0]), float(a[1])), (float(b[0]), float(b[1]))))
+
+    boundary = patch.boundary
+    if isinstance(boundary, LineString):
+        add_line(boundary)
+    elif isinstance(boundary, MultiLineString):
+        for line in boundary.geoms:
+            add_line(line)
+    elif isinstance(boundary, GeometryCollection):
+        for geom in boundary.geoms:
+            if isinstance(geom, LineString):
+                add_line(geom)
+            elif isinstance(geom, MultiLineString):
+                for line in geom.geoms:
+                    add_line(line)
+
+    segments: list[tuple[Point, Point]] = []
+    for a, b in raw_segments:
+        dx = b[0] - a[0]
+        dy = b[1] - a[1]
+        length = math.hypot(dx, dy)
+        if length <= 1e-8:
+            continue
+
+        mid = ((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0)
+        normal = (-dy / length, dx / length)
+        probe = min(1e-4, length * 1e-4)
+        left = ShapelyPoint(mid[0] + normal[0] * probe, mid[1] + normal[1] * probe)
+        right = ShapelyPoint(mid[0] - normal[0] * probe, mid[1] - normal[1] * probe)
+
+        if patch.covers(left) == patch.covers(right):
+            continue
+        segments.append((a, b))
+
+    return segments
+
+
+def boundary_segments_by_interior_score(
+    patch,
+    samples: int,
+    probe_radius: float,
+) -> list[tuple[float, tuple[Point, Point]]]:
+    from shapely.geometry import Point as ShapelyPoint
+
+    cache: dict[tuple[float, float], float] = {}
+
+    def filled_angle(point: Point) -> float:
+        key = (round(point[0], 8), round(point[1], 8))
+        if key in cache:
+            return cache[key]
+
+        hits = 0
+        for index in range(samples):
+            angle = 2.0 * math.pi * index / samples
+            probe = ShapelyPoint(
+                point[0] + probe_radius * math.cos(angle),
+                point[1] + probe_radius * math.sin(angle),
+            )
+            if patch.covers(probe):
+                hits += 1
+        value = 2.0 * math.pi * hits / samples
+        cache[key] = value
+        return value
+
+    scored = []
+    for segment in boundary_segments(patch):
+        score = filled_angle(segment[0]) + filled_angle(segment[1])
+        scored.append((score, segment))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return scored
+
+
+def polygon_for(tile: Tile) -> Polygon:
+    return Polygon(tile.points)
+
+
+def patch_union(state: State):
+    return unary_union([polygon_for(tile) for tile in state.tiles])
+
+
+def state_key(state: State, precision: int) -> tuple[tuple[tuple[float, float], ...], ...]:
+    polygons = []
+    for tile in state.tiles:
+        rounded = tuple(sorted((round(x, precision), round(y, precision)) for x, y in tile.points))
+        polygons.append(rounded)
+    return tuple(sorted(polygons))
+
+
+def candidate_tiles(
+    base_points: tuple[Point, ...],
+    segment: tuple[Point, Point],
+    allow_reflection: bool,
+    dedupe_precision: int,
+) -> Iterable[Tile]:
+    a, b = segment
+    boundary_angle = math.atan2(b[1] - a[1], b[0] - a[0])
+    seen: set[tuple[tuple[float, float], ...]] = set()
+
+    for reflected in ([False, True] if allow_reflection else [False]):
+        source_points = tuple((-x, y) for x, y in base_points) if reflected else base_points
+        for p, q in edges(source_points):
+            tile_angle = math.atan2(q[1] - p[1], q[0] - p[0])
+            angle = boundary_angle + math.pi - tile_angle
+            rotated_p = rotate_point(p, angle)
+            rotated_q = rotate_point(q, angle)
+
+            alignments = (
+                (a[0] - rotated_q[0], a[1] - rotated_q[1]),
+                (b[0] - rotated_p[0], b[1] - rotated_p[1]),
+            )
+            for dx, dy in alignments:
+                points = tuple((rx + dx, ry + dy) for rx, ry in (rotate_point(point, angle) for point in source_points))
+                key = tuple(sorted((round(x, dedupe_precision), round(y, dedupe_precision)) for x, y in points))
+                if key in seen:
+                    continue
+                seen.add(key)
+                yield Tile(points, reflected)
+
+
+def valid_candidate(
+    candidate: Tile,
+    patch,
+    area_tolerance: float,
+    contact_tolerance: float,
+) -> bool:
+    polygon = polygon_for(candidate)
+    if not polygon.is_valid or polygon.area <= area_tolerance:
+        return False
+    if polygon.intersection(patch).area > area_tolerance:
+        return False
+    snapped_boundary = snap(polygon.boundary, patch.boundary, contact_tolerance)
+    if snapped_boundary.intersection(patch.boundary).length < contact_tolerance:
+        return False
+    combined = unary_union([patch, polygon])
+    if isinstance(combined, MultiPolygon):
+        return False
+    return True
+
+
+def boundary_length_after(candidate: Tile, patch) -> float:
+    return unary_union([patch, polygon_for(candidate)]).boundary.length
+
+
+def draw_png(state: State, output: Path, show_labels: bool) -> None:
+    all_points = [point for tile in state.tiles for point in tile.points]
+    min_x = min(x for x, _ in all_points)
+    min_y = min(y for _, y in all_points)
+    max_x = max(x for x, _ in all_points)
+    max_y = max(y for _, y in all_points)
+    pad = 1.0
+    world_width = max_x - min_x + 2 * pad
+    world_height = max_y - min_y + 2 * pad
+    scale = 1400 / max(world_width, world_height, 1e-9)
+    image_width = max(64, round(world_width * scale))
+    image_height = max(64, round(world_height * scale))
+    supersample = 3
+
+    def screen(point: Point) -> tuple[int, int]:
+        x, y = point
+        sx = (x - min_x + pad) * scale * supersample
+        sy = (max_y + pad - y) * scale * supersample
+        return (round(sx), round(sy))
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    image = Image.new("RGB", (image_width * supersample, image_height * supersample), "#fbfaf6")
+    draw = ImageDraw.Draw(image)
+    stroke_width = max(1, round(0.025 * scale * supersample))
+
+    for index, tile in enumerate(state.tiles):
+        color = "#8ca8c8" if tile.reflected else "#d9b487"
+        screen_points = [screen(point) for point in tile.points]
+        draw.polygon(screen_points, fill=color)
+        draw.line(screen_points + [screen_points[0]], fill="#17202a", width=stroke_width, joint="curve")
+        if show_labels:
+            cx = sum(x for x, _ in tile.points) / len(tile.points)
+            cy = sum(y for _, y in tile.points) / len(tile.points)
+            sx, sy = screen((cx, cy))
+            label = str(index)
+            font_size = max(10, round(0.18 * scale * supersample))
+            try:
+                font = ImageFont.truetype("arial.ttf", font_size)
+            except OSError:
+                font = ImageFont.load_default()
+            bbox = draw.textbbox((sx, sy), label, font=font, anchor="mm")
+            draw.rectangle(bbox, fill="#fbfaf6")
+            draw.text((sx, sy), label, fill="#17202a", font=font, anchor="mm")
+
+    image = image.resize((image_width, image_height), Image.Resampling.LANCZOS)
+    image.save(output)
+
+
+def dfs_explore(
+    base_points: tuple[Point, ...],
+    output_dir: Path,
+    allow_reflection: bool,
+    max_tiles: int,
+    max_states: int,
+    area_tolerance: float,
+    contact_tolerance: float,
+    key_precision: int,
+    show_labels: bool,
+    angle_samples: int,
+    probe_radius: float,
+) -> tuple[int, int]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for old_output in tuple(output_dir.glob("step_*.png")) + tuple(output_dir.glob("step_*.svg")):
+        if old_output.is_file():
+            old_output.unlink()
+
+    initial_tiles = (Tile(base_points),)
+    initial = State(initial_tiles, 0, frozenset())
+    initial = State(initial.tiles, initial.depth, frozenset({state_key(initial, key_precision)}))
+    stack: list[State] = [initial]
+    exported = 0
+    expanded = 0
+
+    while stack and exported < max_states:
+        state = stack.pop()
+        draw_png(
+            state,
+            output_dir / f"step_{exported:04d}_depth_{state.depth:02d}_tiles_{len(state.tiles):03d}.png",
+            show_labels,
+        )
+        exported += 1
+        expanded += 1
+
+        if len(state.tiles) >= max_tiles:
+            continue
+
+        patch = patch_union(state)
+        next_items: list[tuple[float, State]] = []
+        scored_segments = boundary_segments_by_interior_score(patch, angle_samples, probe_radius)
+        for _, segment in scored_segments[:1]:
+            directed_segments = (segment, (segment[1], segment[0]))
+            for directed_segment in directed_segments:
+                for candidate in candidate_tiles(base_points, directed_segment, allow_reflection, key_precision):
+                    if not valid_candidate(candidate, patch, area_tolerance, contact_tolerance):
+                        continue
+                    next_tiles = state.tiles + (candidate,)
+                    next_state = State(next_tiles, state.depth + 1, state.path_keys)
+                    key = state_key(next_state, key_precision)
+                    if key in state.path_keys:
+                        continue
+                    next_state = State(next_tiles, state.depth + 1, state.path_keys | {key})
+                    next_items.append((boundary_length_after(candidate, patch), next_state))
+
+                    if len(next_items) >= max_states * 20:
+                        break
+                if len(next_items) >= max_states * 20:
+                    break
+            if len(next_items) >= max_states * 20:
+                break
+        next_items.sort(key=lambda item: item[0])
+        stack.extend(reversed([next_state for _, next_state in next_items]))
+
+    return exported, expanded
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Explore polygon tilings with depth-first boundary growth.")
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument("--polygon", type=Path, help="JSON file containing [[x,y], ...] polygon vertices")
+    source.add_argument("--preset", choices=("hat", "tile11", "square"), default="hat", help="built-in polygon preset")
+    parser.add_argument("-o", "--output-dir", type=Path, default=Path("outputs/dfs"), help="directory for per-state PNGs")
+    parser.add_argument("--allow-reflection", action="store_true", help="also try reflected copies of the tile")
+    parser.add_argument("--max-tiles", type=int, default=8, help="maximum tiles in a patch")
+    parser.add_argument("--max-states", type=int, default=100, help="maximum BFS states to export")
+    parser.add_argument("--area-tol", type=float, default=1e-7, help="allowed overlap area tolerance")
+    parser.add_argument("--contact-tol", type=float, default=1e-6, help="required boundary contact length")
+    parser.add_argument("--key-precision", type=int, default=6, help="rounding precision for duplicate state keys")
+    parser.add_argument("--angle-samples", type=int, default=72, help="samples around each boundary vertex for filled-angle scoring")
+    parser.add_argument("--probe-radius", type=float, default=0.05, help="probe radius for filled-angle scoring")
+    parser.add_argument("--labels", action="store_true", help="label tiles by placement order")
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    if args.max_tiles < 1:
+        raise SystemExit("--max-tiles must be at least 1")
+    if args.max_states < 1:
+        raise SystemExit("--max-states must be at least 1")
+
+    points = load_polygon(args.polygon) if args.polygon else preset_polygon(args.preset)
+    base_points = normalize_base(points)
+    exported, expanded = dfs_explore(
+        base_points,
+        args.output_dir,
+        args.allow_reflection,
+        args.max_tiles,
+        args.max_states,
+        args.area_tol,
+        args.contact_tol,
+        args.key_precision,
+        args.labels,
+        args.angle_samples,
+        args.probe_radius,
+    )
+    print(f"Exported {exported} DFS states after expanding {expanded} states into {args.output_dir}.")
+
+
+if __name__ == "__main__":
+    main()
