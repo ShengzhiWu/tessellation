@@ -408,6 +408,33 @@ def valid_candidate(
     return True
 
 
+def candidate_conflict_indices(
+    candidate: Tile,
+    state: State,
+    patch,
+    area_tolerance: float,
+    contact_tolerance: float,
+) -> tuple[bool, tuple[int, ...]]:
+    polygon = polygon_for(candidate)
+    if not polygon.is_valid or polygon.area <= area_tolerance:
+        return False, ()
+
+    conflicts = []
+    for index, tile in enumerate(state.tiles):
+        if polygon.intersection(polygon_for(tile)).area > area_tolerance:
+            conflicts.append(index)
+    if conflicts:
+        return False, tuple(conflicts)
+
+    snapped_boundary = snap(polygon.boundary, patch.boundary, contact_tolerance)
+    if snapped_boundary.intersection(patch.boundary).length < contact_tolerance:
+        return False, ()
+    combined = unary_union([patch, polygon])
+    if isinstance(combined, MultiPolygon):
+        return False, ()
+    return True, ()
+
+
 def boundary_length_after(candidate: Tile, patch) -> float:
     return unary_union([patch, polygon_for(candidate)]).boundary.length
 
@@ -482,7 +509,7 @@ def dfs_explore(
 
     with trace_path.open("w", newline="", encoding="utf-8") as trace_file:
         trace = csv.writer(trace_file)
-        trace.writerow(("step", "tiles", "stack_size", "exported"))
+        trace.writerow(("step", "tiles", "stack_size", "exported", "backjump_to_tiles"))
 
         while stack and expanded < max_states:
             state = stack.pop()
@@ -493,14 +520,15 @@ def dfs_explore(
                     output_dir / f"step_{expanded:04d}_tiles_{len(state.tiles):03d}.png",
                 )
                 exported += 1
-            trace.writerow((expanded, len(state.tiles), len(stack), int(should_export)))
-            expanded += 1
 
             if len(state.tiles) >= max_tiles:
+                trace.writerow((expanded, len(state.tiles), len(stack), int(should_export), ""))
+                expanded += 1
                 continue
 
             patch = patch_union(state)
             next_items: list[tuple[float, State]] = []
+            conflict_indices: set[int] = set()
             if score_mode == "angle":
                 scored_segments = boundary_segments_by_interior_score(patch, angle_samples, probe_radius)
             else:
@@ -521,7 +549,15 @@ def dfs_explore(
                         allowed_length_pairs,
                         length_tolerance,
                     ):
-                        if not valid_candidate(candidate, patch, area_tolerance, contact_tolerance):
+                        valid, conflicts = candidate_conflict_indices(
+                            candidate,
+                            state,
+                            patch,
+                            area_tolerance,
+                            contact_tolerance,
+                        )
+                        conflict_indices.update(conflicts)
+                        if not valid:
                             continue
                         next_tiles = state.tiles + (candidate,)
                         next_state = State(next_tiles, state.depth + 1, state.path_keys)
@@ -538,7 +574,16 @@ def dfs_explore(
                 if len(next_items) >= max_states * 20:
                     break
             next_items.sort(key=lambda item: item[0])
-            stack.extend(reversed([next_state for _, next_state in next_items]))
+            backjump_to_tiles = ""
+            if next_items:
+                stack.extend(reversed([next_state for _, next_state in next_items]))
+            elif conflict_indices:
+                latest_conflict = max(conflict_indices)
+                backjump_to_tiles = latest_conflict
+                stack = [stack_state for stack_state in stack if len(stack_state.tiles) <= latest_conflict]
+
+            trace.writerow((expanded, len(state.tiles), len(stack), int(should_export), backjump_to_tiles))
+            expanded += 1
 
     return exported, expanded
 
