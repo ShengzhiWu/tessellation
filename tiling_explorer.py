@@ -102,7 +102,30 @@ def load_polygon(path: Path) -> tuple[Point, ...]:
     return tuple(points)
 
 
+def remove_collinear_vertices(points: tuple[Point, ...], tolerance: float = 1e-9) -> tuple[Point, ...]:
+    cleaned = list(points)
+    changed = True
+    while changed and len(cleaned) > 3:
+        changed = False
+        next_points: list[Point] = []
+        for index, point in enumerate(cleaned):
+            previous = cleaned[index - 1]
+            following = cleaned[(index + 1) % len(cleaned)]
+            incoming = (point[0] - previous[0], point[1] - previous[1])
+            outgoing = (following[0] - point[0], following[1] - point[1])
+            cross = incoming[0] * outgoing[1] - incoming[1] * outgoing[0]
+            dot = incoming[0] * outgoing[0] + incoming[1] * outgoing[1]
+            scale = math.hypot(*incoming) * math.hypot(*outgoing)
+            if scale > 0 and abs(cross) <= tolerance * scale and dot > 0:
+                changed = True
+                continue
+            next_points.append(point)
+        cleaned = next_points
+    return tuple(cleaned)
+
+
 def normalize_base(points: tuple[Point, ...]) -> tuple[Point, ...]:
+    points = remove_collinear_vertices(points)
     polygon = Polygon(points)
     if not polygon.is_valid or polygon.area <= 0:
         raise SystemExit("Input polygon must be valid and have positive area.")
