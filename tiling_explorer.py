@@ -13,6 +13,7 @@ import argparse
 import csv
 import json
 import math
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -638,9 +639,10 @@ def dfs_explore(
 
     with trace_path.open("w", newline="", encoding="utf-8") as trace_file:
         trace = csv.writer(trace_file)
-        trace.writerow(("step", "tiles", "stack_size", "exported", "backjump_to_tiles"))
+        trace.writerow(("step", "tiles", "stack_size", "exported", "backjump_to_tiles", "step_ms"))
 
         while stack and expanded < max_states:
+            step_start = time.perf_counter()
             frame = stack[-1]
             state = frame.state
 
@@ -664,7 +666,8 @@ def dfs_explore(
                         latest_conflict = max(conflict_indices)
                         backjump_to_tiles = latest_conflict
 
-                trace.writerow((expanded, len(state.tiles), pending_choice_count(), int(should_export), backjump_to_tiles))
+                step_ms = (time.perf_counter() - step_start) * 1000.0
+                trace.writerow((expanded, len(state.tiles), pending_choice_count(), int(should_export), backjump_to_tiles, f"{step_ms:.3f}"))
                 expanded += 1
 
                 if backjump_to_tiles != "":
