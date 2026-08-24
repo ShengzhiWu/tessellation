@@ -420,10 +420,10 @@ def draw_png(state: State, output: Path, show_labels: bool) -> None:
     pad = 1.0
     world_width = max_x - min_x + 2 * pad
     world_height = max_y - min_y + 2 * pad
-    scale = 1400 / max(world_width, world_height, 1e-9)
+    scale = 700 / max(world_width, world_height, 1e-9)
     image_width = max(64, round(world_width * scale))
     image_height = max(64, round(world_height * scale))
-    supersample = 3
+    supersample = 2
 
     def screen(point: Point) -> tuple[int, int]:
         x, y = point
@@ -434,7 +434,8 @@ def draw_png(state: State, output: Path, show_labels: bool) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     image = Image.new("RGB", (image_width * supersample, image_height * supersample), "#fbfaf6")
     draw = ImageDraw.Draw(image)
-    stroke_width = max(1, round(0.025 * scale * supersample))
+    thickness = 1
+    stroke_width = max(1, round(thickness * supersample))
 
     for index, tile in enumerate(state.tiles):
         color = "#8ca8c8" if tile.reflected else "#d9b487"
@@ -455,7 +456,7 @@ def draw_png(state: State, output: Path, show_labels: bool) -> None:
             draw.rectangle(bbox, fill="#fbfaf6")
             draw.text((sx, sy), label, fill="#17202a", font=font, anchor="mm")
 
-    image = image.resize((image_width, image_height), Image.Resampling.LANCZOS)
+    image = image.resize((image_width, image_height), Image.Resampling.BOX)
     image.save(output)
 
 
