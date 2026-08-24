@@ -142,6 +142,47 @@ def point_diameter(points: tuple[Point, ...]) -> float:
     return max(math.dist(a, b) for index, a in enumerate(points) for b in points[index + 1 :])
 
 
+def parse_length_value(text: str) -> float:
+    normalized = text.strip().lower().replace(" ", "")
+    if normalized in {"sqrt3", "sqrt(3)", "√3"}:
+        return SQRT3
+    return float(normalized)
+
+
+def parse_allowed_length_pairs(text: str | None) -> tuple[tuple[float, float], ...] | None:
+    if text is None or not text.strip():
+        return None
+
+    pairs = []
+    for item in text.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        separator = ":" if ":" in item else "-"
+        parts = item.split(separator)
+        if len(parts) != 2:
+            raise argparse.ArgumentTypeError("length pairs must look like 1:1,1:2,sqrt3:sqrt3")
+        a = parse_length_value(parts[0])
+        b = parse_length_value(parts[1])
+        pairs.append(tuple(sorted((a, b))))
+    if not pairs:
+        raise argparse.ArgumentTypeError("at least one length pair is required")
+    return tuple(pairs)
+
+
+def length_pair_allowed(
+    first: float,
+    second: float,
+    allowed_pairs: tuple[tuple[float, float], ...] | None,
+    tolerance: float,
+) -> bool:
+    if allowed_pairs is None:
+        return True
+
+    pair = tuple(sorted((first, second)))
+    return any(abs(pair[0] - allowed[0]) <= tolerance and abs(pair[1] - allowed[1]) <= tolerance for allowed in allowed_pairs)
+
+
 def rotate_point(point: Point, angle: float) -> Point:
     x, y = point
     c = math.cos(angle)
@@ -315,14 +356,19 @@ def candidate_tiles(
     segment: tuple[Point, Point],
     allow_reflection: bool,
     dedupe_precision: int,
+    allowed_length_pairs: tuple[tuple[float, float], ...] | None,
+    length_tolerance: float,
 ) -> Iterable[Tile]:
     a, b = segment
     boundary_angle = math.atan2(b[1] - a[1], b[0] - a[0])
+    boundary_length = math.dist(a, b)
     seen: set[tuple[tuple[float, float], ...]] = set()
 
     for reflected in ([False, True] if allow_reflection else [False]):
         source_points = tuple((-x, y) for x, y in base_points) if reflected else base_points
         for p, q in edges(source_points):
+            if not length_pair_allowed(boundary_length, math.dist(p, q), allowed_length_pairs, length_tolerance):
+                continue
             tile_angle = math.atan2(q[1] - p[1], q[0] - p[0])
             angle = boundary_angle + math.pi - tile_angle
             rotated_p = rotate_point(p, angle)
@@ -428,6 +474,8 @@ def dfs_explore(
     probe_radius: float,
     bitmap_pixels_per_tile_diameter: float,
     bitmap_blur_radius_diameters: float,
+    allowed_length_pairs: tuple[tuple[float, float], ...] | None,
+    length_tolerance: float,
 ) -> tuple[int, int]:
     output_dir.mkdir(parents=True, exist_ok=True)
     for old_output in tuple(output_dir.glob("step_*.png")) + tuple(output_dir.glob("step_*.svg")):
@@ -469,7 +517,14 @@ def dfs_explore(
         for _, segment in scored_segments[:1]:
             directed_segments = (segment, (segment[1], segment[0]))
             for directed_segment in directed_segments:
-                for candidate in candidate_tiles(base_points, directed_segment, allow_reflection, key_precision):
+                for candidate in candidate_tiles(
+                    base_points,
+                    directed_segment,
+                    allow_reflection,
+                    key_precision,
+                    allowed_length_pairs,
+                    length_tolerance,
+                ):
                     if not valid_candidate(candidate, patch, area_tolerance, contact_tolerance):
                         continue
                     next_tiles = state.tiles + (candidate,)
@@ -504,6 +559,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--area-tol", type=float, default=1e-7, help="allowed overlap area tolerance")
     parser.add_argument("--contact-tol", type=float, default=1e-6, help="required boundary contact length")
     parser.add_argument("--key-precision", type=int, default=6, help="rounding precision for duplicate state keys")
+    parser.add_argument(
+        "--allowed-length-pairs",
+        type=parse_allowed_length_pairs,
+        help="comma-separated allowed glued edge length pairs, for example 1:1,1:2,2:2,sqrt3:sqrt3",
+    )
+    parser.add_argument("--length-tol", type=float, default=1e-6, help="tolerance for matching allowed edge lengths")
     parser.add_argument("--score-mode", choices=("bitmap", "angle"), default="bitmap", help="boundary edge score to use")
     parser.add_argument("--angle-samples", type=int, default=72, help="samples around each boundary vertex for filled-angle scoring")
     parser.add_argument("--probe-radius", type=float, default=0.05, help="probe radius for filled-angle scoring")
@@ -529,6 +590,8 @@ def main() -> None:
         raise SystemExit("--max-tiles must be at least 1")
     if args.max_states < 1:
         raise SystemExit("--max-states must be at least 1")
+    if args.length_tol < 0:
+        raise SystemExit("--length-tol must be non-negative")
     if args.bitmap_pixels_per_tile_diameter <= 0:
         raise SystemExit("--bitmap-pixels-per-tile-diameter must be positive")
     if args.bitmap_blur_radius_diameters < 0:
@@ -551,6 +614,8 @@ def main() -> None:
         args.probe_radius,
         args.bitmap_pixels_per_tile_diameter,
         args.bitmap_blur_radius_diameters,
+        args.allowed_length_pairs,
+        args.length_tol,
     )
     print(f"Exported {exported} DFS states after expanding {expanded} states into {args.output_dir}.")
 
