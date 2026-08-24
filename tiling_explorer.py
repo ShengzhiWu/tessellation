@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 from shapely.geometry import GeometryCollection, LineString, MultiLineString, MultiPolygon, Point as ShapelyPoint, Polygon
 from shapely.ops import snap, unary_union
 
@@ -115,6 +115,10 @@ def edges(points: tuple[Point, ...]) -> Iterable[tuple[Point, Point]]:
     yield from zip(points, points[1:] + points[:1])
 
 
+def point_diameter(points: tuple[Point, ...]) -> float:
+    return max(math.dist(a, b) for index, a in enumerate(points) for b in points[index + 1 :])
+
+
 def rotate_point(point: Point, angle: float) -> Point:
     x, y = point
     c = math.cos(angle)
@@ -202,6 +206,67 @@ def boundary_segments_by_interior_score(
     for segment in boundary_segments(patch):
         score = filled_angle(segment[0]) + filled_angle(segment[1])
         scored.append((score, segment))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return scored
+
+
+def boundary_segments_by_bitmap_score(
+    patch,
+    tile_diameter: float,
+    pixels_per_tile_diameter: float,
+    blur_radius_diameters: float,
+) -> list[tuple[float, tuple[Point, Point]]]:
+    segments = boundary_segments(patch)
+    if not segments:
+        return []
+
+    min_x, min_y, max_x, max_y = patch.bounds
+    pixels_per_world_unit = pixels_per_tile_diameter / tile_diameter
+    blur_radius_pixels = blur_radius_diameters * pixels_per_tile_diameter
+    pad_world = max(tile_diameter, 3.0 * blur_radius_pixels / pixels_per_world_unit)
+    min_x -= pad_world
+    min_y -= pad_world
+    max_x += pad_world
+    max_y += pad_world
+
+    width = max(8, math.ceil((max_x - min_x) * pixels_per_world_unit))
+    height = max(8, math.ceil((max_y - min_y) * pixels_per_world_unit))
+    image = Image.new("L", (width, height), 255)
+    draw = ImageDraw.Draw(image)
+
+    def to_pixel(point: Point) -> tuple[float, float]:
+        x, y = point
+        return ((x - min_x) * pixels_per_world_unit, (max_y - y) * pixels_per_world_unit)
+
+    polygons = patch.geoms if isinstance(patch, MultiPolygon) else (patch,)
+    for polygon in polygons:
+        exterior = [to_pixel((float(x), float(y))) for x, y in polygon.exterior.coords]
+        draw.polygon(exterior, fill=0)
+        for interior in polygon.interiors:
+            hole = [to_pixel((float(x), float(y))) for x, y in interior.coords]
+            draw.polygon(hole, fill=255)
+
+    blurred = image.filter(ImageFilter.GaussianBlur(radius=blur_radius_pixels))
+    pixels = blurred.load()
+
+    def interpolated_gray(point: Point) -> float:
+        px, py = to_pixel(point)
+        px = min(max(px, 0.0), width - 1.0)
+        py = min(max(py, 0.0), height - 1.0)
+        x0 = math.floor(px)
+        y0 = math.floor(py)
+        x1 = min(x0 + 1, width - 1)
+        y1 = min(y0 + 1, height - 1)
+        tx = px - x0
+        ty = py - y0
+        top = pixels[x0, y0] * (1.0 - tx) + pixels[x1, y0] * tx
+        bottom = pixels[x0, y1] * (1.0 - tx) + pixels[x1, y1] * tx
+        return top * (1.0 - ty) + bottom * ty
+
+    scored = []
+    for a, b in segments:
+        midpoint = ((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0)
+        scored.append((255.0 - interpolated_gray(midpoint), (a, b)))
     scored.sort(key=lambda item: item[0], reverse=True)
     return scored
 
@@ -335,8 +400,11 @@ def dfs_explore(
     contact_tolerance: float,
     key_precision: int,
     show_labels: bool,
+    score_mode: str,
     angle_samples: int,
     probe_radius: float,
+    bitmap_pixels_per_tile_diameter: float,
+    bitmap_blur_radius_diameters: float,
 ) -> tuple[int, int]:
     output_dir.mkdir(parents=True, exist_ok=True)
     for old_output in tuple(output_dir.glob("step_*.png")) + tuple(output_dir.glob("step_*.svg")):
@@ -347,6 +415,7 @@ def dfs_explore(
     initial = State(initial_tiles, 0, frozenset())
     initial = State(initial.tiles, initial.depth, frozenset({state_key(initial, key_precision)}))
     stack: list[State] = [initial]
+    tile_diameter = point_diameter(base_points)
     exported = 0
     expanded = 0
 
@@ -365,7 +434,15 @@ def dfs_explore(
 
         patch = patch_union(state)
         next_items: list[tuple[float, State]] = []
-        scored_segments = boundary_segments_by_interior_score(patch, angle_samples, probe_radius)
+        if score_mode == "angle":
+            scored_segments = boundary_segments_by_interior_score(patch, angle_samples, probe_radius)
+        else:
+            scored_segments = boundary_segments_by_bitmap_score(
+                patch,
+                tile_diameter,
+                bitmap_pixels_per_tile_diameter,
+                bitmap_blur_radius_diameters,
+            )
         for _, segment in scored_segments[:1]:
             directed_segments = (segment, (segment[1], segment[0]))
             for directed_segment in directed_segments:
@@ -400,12 +477,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("-o", "--output-dir", type=Path, default=Path("outputs/dfs"), help="directory for per-state PNGs")
     parser.add_argument("--allow-reflection", action="store_true", help="also try reflected copies of the tile")
     parser.add_argument("--max-tiles", type=int, default=8, help="maximum tiles in a patch")
-    parser.add_argument("--max-states", type=int, default=100, help="maximum BFS states to export")
+    parser.add_argument("--max-states", type=int, default=100, help="maximum DFS states to export")
     parser.add_argument("--area-tol", type=float, default=1e-7, help="allowed overlap area tolerance")
     parser.add_argument("--contact-tol", type=float, default=1e-6, help="required boundary contact length")
     parser.add_argument("--key-precision", type=int, default=6, help="rounding precision for duplicate state keys")
+    parser.add_argument("--score-mode", choices=("bitmap", "angle"), default="bitmap", help="boundary edge score to use")
     parser.add_argument("--angle-samples", type=int, default=72, help="samples around each boundary vertex for filled-angle scoring")
     parser.add_argument("--probe-radius", type=float, default=0.05, help="probe radius for filled-angle scoring")
+    parser.add_argument(
+        "--bitmap-pixels-per-tile-diameter",
+        type=float,
+        default=10.0,
+        help="bitmap scoring resolution; one tile diameter maps to this many pixels",
+    )
+    parser.add_argument(
+        "--bitmap-blur-radius-diameters",
+        type=float,
+        default=1.0,
+        help="Gaussian blur radius for bitmap scoring, measured in tile diameters",
+    )
     parser.add_argument("--labels", action="store_true", help="label tiles by placement order")
     return parser.parse_args()
 
@@ -416,6 +506,10 @@ def main() -> None:
         raise SystemExit("--max-tiles must be at least 1")
     if args.max_states < 1:
         raise SystemExit("--max-states must be at least 1")
+    if args.bitmap_pixels_per_tile_diameter <= 0:
+        raise SystemExit("--bitmap-pixels-per-tile-diameter must be positive")
+    if args.bitmap_blur_radius_diameters < 0:
+        raise SystemExit("--bitmap-blur-radius-diameters must be non-negative")
 
     points = load_polygon(args.polygon) if args.polygon else preset_polygon(args.preset)
     base_points = normalize_base(points)
@@ -429,8 +523,11 @@ def main() -> None:
         args.contact_tol,
         args.key_precision,
         args.labels,
+        args.score_mode,
         args.angle_samples,
         args.probe_radius,
+        args.bitmap_pixels_per_tile_diameter,
+        args.bitmap_blur_radius_diameters,
     )
     print(f"Exported {exported} DFS states after expanding {expanded} states into {args.output_dir}.")
 
