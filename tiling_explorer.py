@@ -32,6 +32,9 @@ Point = tuple[float, float]
 class Tile:
     points: tuple[Point, ...]
     reflected: bool = False
+    x: float = 0.0
+    y: float = 0.0
+    angle: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -352,6 +355,20 @@ def state_key(state: State, precision: int) -> tuple[tuple[tuple[float, float], 
     return tuple(sorted(polygons))
 
 
+def save_state_h5(state: State, output: Path) -> None:
+    import h5py
+    import numpy as np
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    transforms = np.array([(tile.x, tile.y, tile.angle) for tile in state.tiles], dtype="float64")
+    reflected = np.array([tile.reflected for tile in state.tiles], dtype="bool")
+    with h5py.File(output, "w") as file:
+        file.create_dataset("transforms", data=transforms)
+        file.create_dataset("reflected", data=reflected)
+        file.attrs["columns"] = "x,y,angle"
+        file.attrs["tile_count"] = len(state.tiles)
+
+
 def candidate_tiles(
     base_points: tuple[Point, ...],
     segment: tuple[Point, Point],
@@ -385,7 +402,7 @@ def candidate_tiles(
                 if key in seen:
                     continue
                 seen.add(key)
-                yield Tile(points, reflected)
+                yield Tile(points, reflected, dx, dy, angle)
 
 
 def valid_candidate(
@@ -492,9 +509,11 @@ def dfs_explore(
     allowed_length_pairs: tuple[tuple[float, float], ...] | None,
     length_tolerance: float,
     export_every: int,
+    save_state_h5_files: bool,
 ) -> tuple[int, int]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    for old_output in tuple(output_dir.glob("step_*.png")) + tuple(output_dir.glob("step_*.svg")):
+    old_outputs = tuple(output_dir.glob("step_*.png")) + tuple(output_dir.glob("step_*.svg")) + tuple(output_dir.glob("state_*.h5"))
+    for old_output in old_outputs:
         if old_output.is_file():
             old_output.unlink()
     trace_path = output_dir / "trace.csv"
@@ -520,6 +539,8 @@ def dfs_explore(
                     output_dir / f"step_{expanded:04d}_tiles_{len(state.tiles):03d}.png",
                 )
                 exported += 1
+            if save_state_h5_files:
+                save_state_h5(state, output_dir / f"state_{expanded:04d}_tiles_{len(state.tiles):03d}.h5")
 
             if len(state.tiles) >= max_tiles:
                 trace.writerow((expanded, len(state.tiles), len(stack), int(should_export), ""))
@@ -598,6 +619,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-tiles", type=int, default=8, help="maximum tiles in a patch")
     parser.add_argument("--max-states", type=int, default=100, help="maximum DFS states to expand")
     parser.add_argument("--export-every", type=int, default=1, help="export one PNG every N expanded DFS states")
+    parser.add_argument("--save-state-h5", action="store_true", help="save one HDF5 state file for every expanded DFS state")
     parser.add_argument("--area-tol", type=float, default=1e-7, help="allowed overlap area tolerance")
     parser.add_argument("--contact-tol", type=float, default=1e-6, help="required boundary contact length")
     parser.add_argument("--key-precision", type=int, default=6, help="rounding precision for duplicate state keys")
@@ -659,6 +681,7 @@ def main() -> None:
         args.allowed_length_pairs,
         args.length_tol,
         args.export_every,
+        args.save_state_h5,
     )
     print(f"Exported {exported} PNGs after expanding {expanded} DFS states into {args.output_dir}.")
 
