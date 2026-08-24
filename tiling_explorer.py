@@ -452,6 +452,50 @@ def candidate_conflict_indices(
     return True, ()
 
 
+def collinear_touching_segments(
+    first: tuple[Point, Point],
+    second: tuple[Point, Point],
+    tolerance: float,
+) -> bool:
+    a, b = first
+    c, d = second
+    first_vector = (b[0] - a[0], b[1] - a[1])
+    second_vector = (d[0] - c[0], d[1] - c[1])
+    first_length = math.hypot(*first_vector)
+    second_length = math.hypot(*second_vector)
+    if first_length <= tolerance or second_length <= tolerance:
+        return False
+
+    direction_cross = first_vector[0] * second_vector[1] - first_vector[1] * second_vector[0]
+    offset = (c[0] - a[0], c[1] - a[1])
+    offset_cross = first_vector[0] * offset[1] - first_vector[1] * offset[0]
+    if abs(direction_cross) > tolerance * first_length * second_length:
+        return False
+    if abs(offset_cross) > tolerance * first_length * max(math.hypot(*offset), 1.0):
+        return False
+
+    return any(math.dist(first_endpoint, second_endpoint) <= tolerance for first_endpoint in first for second_endpoint in second)
+
+
+def segment_provider_indices(
+    state: State,
+    segment: tuple[Point, Point],
+    tolerance: float,
+) -> set[int]:
+    providers: set[int] = set()
+    segment_line = LineString(segment)
+    for index, tile in enumerate(state.tiles):
+        polygon = polygon_for(tile)
+        if polygon.boundary.intersection(segment_line).length > tolerance:
+            providers.add(index)
+            continue
+        for tile_segment in edges(tile.points):
+            if collinear_touching_segments(segment, tile_segment, tolerance):
+                providers.add(index)
+                break
+    return providers
+
+
 def boundary_length_after(candidate: Tile, patch) -> float:
     return unary_union([patch, polygon_for(candidate)]).boundary.length
 
@@ -558,8 +602,9 @@ def dfs_explore(
                     tile_diameter,
                     bitmap_pixels_per_tile_diameter,
                     bitmap_blur_radius_diameters,
-                )
+            )
             for _, segment in scored_segments[:1]:
+                conflict_indices.update(segment_provider_indices(state, segment, contact_tolerance))
                 directed_segments = (segment, (segment[1], segment[0]))
                 for directed_segment in directed_segments:
                     for candidate in candidate_tiles(
