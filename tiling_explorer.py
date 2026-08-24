@@ -44,6 +44,13 @@ class State:
     path_keys: frozenset[tuple[tuple[tuple[float, float], ...], ...]]
 
 
+@dataclass
+class Frame:
+    state: State
+    choices: list[State] | None = None
+    next_index: int = 0
+
+
 def preset_polygon(name: str) -> tuple[Point, ...]:
     if name == "square":
         return ((0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0))
@@ -565,91 +572,114 @@ def dfs_explore(
     initial_tiles = (Tile(base_points),)
     initial = State(initial_tiles, 0, frozenset())
     initial = State(initial.tiles, initial.depth, frozenset({state_key(initial, key_precision)}))
-    stack: list[State] = [initial]
+    stack: list[Frame] = [Frame(initial)]
     tile_diameter = point_diameter(base_points)
     exported = 0
     expanded = 0
+
+    def pending_choice_count() -> int:
+        return sum(max(0, len(frame.choices) - frame.next_index) for frame in stack if frame.choices is not None)
+
+    def generate_choices(state: State) -> tuple[list[State], set[int]]:
+        patch = patch_union(state)
+        next_items: list[tuple[float, State]] = []
+        conflict_indices: set[int] = set()
+        if score_mode == "angle":
+            scored_segments = boundary_segments_by_interior_score(patch, angle_samples, probe_radius)
+        else:
+            scored_segments = boundary_segments_by_bitmap_score(
+                patch,
+                tile_diameter,
+                bitmap_pixels_per_tile_diameter,
+                bitmap_blur_radius_diameters,
+            )
+        for _, segment in scored_segments[:1]:
+            conflict_indices.update(segment_provider_indices(state, segment, contact_tolerance))
+            directed_segments = (segment, (segment[1], segment[0]))
+            for directed_segment in directed_segments:
+                for candidate in candidate_tiles(
+                    base_points,
+                    directed_segment,
+                    allow_reflection,
+                    key_precision,
+                    allowed_length_pairs,
+                    length_tolerance,
+                ):
+                    valid, conflicts = candidate_conflict_indices(
+                        candidate,
+                        state,
+                        patch,
+                        area_tolerance,
+                        contact_tolerance,
+                    )
+                    conflict_indices.update(conflicts)
+                    if not valid:
+                        continue
+                    next_tiles = state.tiles + (candidate,)
+                    next_state = State(next_tiles, state.depth + 1, state.path_keys)
+                    key = state_key(next_state, key_precision)
+                    if key in state.path_keys:
+                        continue
+                    next_state = State(next_tiles, state.depth + 1, state.path_keys | {key})
+                    next_items.append((boundary_length_after(candidate, patch), next_state))
+
+                    if len(next_items) >= max_states * 20:
+                        break
+                if len(next_items) >= max_states * 20:
+                    break
+            if len(next_items) >= max_states * 20:
+                break
+        next_items.sort(key=lambda item: item[0])
+        return [next_state for _, next_state in next_items], conflict_indices
+
+    def backjump_to_tile(tile_index: int) -> None:
+        while stack and len(stack[-1].state.tiles) > tile_index:
+            stack.pop()
 
     with trace_path.open("w", newline="", encoding="utf-8") as trace_file:
         trace = csv.writer(trace_file)
         trace.writerow(("step", "tiles", "stack_size", "exported", "backjump_to_tiles"))
 
         while stack and expanded < max_states:
-            state = stack.pop()
-            should_export = expanded % export_every == 0
-            if should_export:
-                draw_png(
-                    state,
-                    output_dir / f"step_{expanded:04d}_tiles_{len(state.tiles):03d}.png",
-                )
-                exported += 1
-            if save_state_h5_files:
-                save_state_h5(state, output_dir / f"state_{expanded:04d}_tiles_{len(state.tiles):03d}.h5")
+            frame = stack[-1]
+            state = frame.state
 
-            if len(state.tiles) >= max_tiles:
-                trace.writerow((expanded, len(state.tiles), len(stack), int(should_export), ""))
+            if frame.choices is None:
+                should_export = expanded % export_every == 0
+                if should_export:
+                    draw_png(
+                        state,
+                        output_dir / f"step_{expanded:04d}_tiles_{len(state.tiles):03d}.png",
+                    )
+                    exported += 1
+                if save_state_h5_files:
+                    save_state_h5(state, output_dir / f"state_{expanded:04d}_tiles_{len(state.tiles):03d}.h5")
+
+                backjump_to_tiles = ""
+                if len(state.tiles) >= max_tiles:
+                    frame.choices = []
+                else:
+                    frame.choices, conflict_indices = generate_choices(state)
+                    if not frame.choices and conflict_indices:
+                        latest_conflict = max(conflict_indices)
+                        backjump_to_tiles = latest_conflict
+
+                trace.writerow((expanded, len(state.tiles), pending_choice_count(), int(should_export), backjump_to_tiles))
                 expanded += 1
+
+                if backjump_to_tiles != "":
+                    backjump_to_tile(int(backjump_to_tiles))
+                elif not frame.choices:
+                    stack.pop()
                 continue
 
-            patch = patch_union(state)
-            next_items: list[tuple[float, State]] = []
-            conflict_indices: set[int] = set()
-            if score_mode == "angle":
-                scored_segments = boundary_segments_by_interior_score(patch, angle_samples, probe_radius)
-            else:
-                scored_segments = boundary_segments_by_bitmap_score(
-                    patch,
-                    tile_diameter,
-                    bitmap_pixels_per_tile_diameter,
-                    bitmap_blur_radius_diameters,
-            )
-            for _, segment in scored_segments[:1]:
-                conflict_indices.update(segment_provider_indices(state, segment, contact_tolerance))
-                directed_segments = (segment, (segment[1], segment[0]))
-                for directed_segment in directed_segments:
-                    for candidate in candidate_tiles(
-                        base_points,
-                        directed_segment,
-                        allow_reflection,
-                        key_precision,
-                        allowed_length_pairs,
-                        length_tolerance,
-                    ):
-                        valid, conflicts = candidate_conflict_indices(
-                            candidate,
-                            state,
-                            patch,
-                            area_tolerance,
-                            contact_tolerance,
-                        )
-                        conflict_indices.update(conflicts)
-                        if not valid:
-                            continue
-                        next_tiles = state.tiles + (candidate,)
-                        next_state = State(next_tiles, state.depth + 1, state.path_keys)
-                        key = state_key(next_state, key_precision)
-                        if key in state.path_keys:
-                            continue
-                        next_state = State(next_tiles, state.depth + 1, state.path_keys | {key})
-                        next_items.append((boundary_length_after(candidate, patch), next_state))
+            if frame.next_index >= len(frame.choices):
+                stack.pop()
+                continue
 
-                        if len(next_items) >= max_states * 20:
-                            break
-                    if len(next_items) >= max_states * 20:
-                        break
-                if len(next_items) >= max_states * 20:
-                    break
-            next_items.sort(key=lambda item: item[0])
-            backjump_to_tiles = ""
-            if next_items:
-                stack.extend(reversed([next_state for _, next_state in next_items]))
-            elif conflict_indices:
-                latest_conflict = max(conflict_indices)
-                backjump_to_tiles = latest_conflict
-                stack = [stack_state for stack_state in stack if len(stack_state.tiles) <= latest_conflict]
-
-            trace.writerow((expanded, len(state.tiles), len(stack), int(should_export), backjump_to_tiles))
-            expanded += 1
+            child = frame.choices[frame.next_index]
+            frame.next_index += 1
+            stack.append(Frame(child))
 
     return exported, expanded
 
