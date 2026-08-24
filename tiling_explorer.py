@@ -4,12 +4,13 @@
 The search starts with one tile, then repeatedly chooses an exposed boundary
 edge of the current patch and tries to attach a fresh copy of the input polygon
 by making one of its edges collinear in the opposite direction and sharing one
-endpoint.  Each accepted DFS state is exported as a PNG.
+endpoint.  Accepted DFS states can be exported as PNGs at a fixed interval.
 """
 
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import math
 from dataclasses import dataclass
@@ -463,11 +464,13 @@ def dfs_explore(
     bitmap_blur_radius_diameters: float,
     allowed_length_pairs: tuple[tuple[float, float], ...] | None,
     length_tolerance: float,
+    export_every: int,
 ) -> tuple[int, int]:
     output_dir.mkdir(parents=True, exist_ok=True)
     for old_output in tuple(output_dir.glob("step_*.png")) + tuple(output_dir.glob("step_*.svg")):
         if old_output.is_file():
             old_output.unlink()
+    trace_path = output_dir / "trace.csv"
 
     initial_tiles = (Tile(base_points),)
     initial = State(initial_tiles, 0, frozenset())
@@ -477,58 +480,65 @@ def dfs_explore(
     exported = 0
     expanded = 0
 
-    while stack and exported < max_states:
-        state = stack.pop()
-        draw_png(
-            state,
-            output_dir / f"step_{exported:04d}_depth_{state.depth:02d}_tiles_{len(state.tiles):03d}.png",
-        )
-        exported += 1
-        expanded += 1
+    with trace_path.open("w", newline="", encoding="utf-8") as trace_file:
+        trace = csv.writer(trace_file)
+        trace.writerow(("step", "tiles", "stack_size", "exported"))
 
-        if len(state.tiles) >= max_tiles:
-            continue
+        while stack and expanded < max_states:
+            state = stack.pop()
+            should_export = expanded % export_every == 0
+            if should_export:
+                draw_png(
+                    state,
+                    output_dir / f"step_{expanded:04d}_tiles_{len(state.tiles):03d}.png",
+                )
+                exported += 1
+            trace.writerow((expanded, len(state.tiles), len(stack), int(should_export)))
+            expanded += 1
 
-        patch = patch_union(state)
-        next_items: list[tuple[float, State]] = []
-        if score_mode == "angle":
-            scored_segments = boundary_segments_by_interior_score(patch, angle_samples, probe_radius)
-        else:
-            scored_segments = boundary_segments_by_bitmap_score(
-                patch,
-                tile_diameter,
-                bitmap_pixels_per_tile_diameter,
-                bitmap_blur_radius_diameters,
-            )
-        for _, segment in scored_segments[:1]:
-            directed_segments = (segment, (segment[1], segment[0]))
-            for directed_segment in directed_segments:
-                for candidate in candidate_tiles(
-                    base_points,
-                    directed_segment,
-                    allow_reflection,
-                    key_precision,
-                    allowed_length_pairs,
-                    length_tolerance,
-                ):
-                    if not valid_candidate(candidate, patch, area_tolerance, contact_tolerance):
-                        continue
-                    next_tiles = state.tiles + (candidate,)
-                    next_state = State(next_tiles, state.depth + 1, state.path_keys)
-                    key = state_key(next_state, key_precision)
-                    if key in state.path_keys:
-                        continue
-                    next_state = State(next_tiles, state.depth + 1, state.path_keys | {key})
-                    next_items.append((boundary_length_after(candidate, patch), next_state))
+            if len(state.tiles) >= max_tiles:
+                continue
 
+            patch = patch_union(state)
+            next_items: list[tuple[float, State]] = []
+            if score_mode == "angle":
+                scored_segments = boundary_segments_by_interior_score(patch, angle_samples, probe_radius)
+            else:
+                scored_segments = boundary_segments_by_bitmap_score(
+                    patch,
+                    tile_diameter,
+                    bitmap_pixels_per_tile_diameter,
+                    bitmap_blur_radius_diameters,
+                )
+            for _, segment in scored_segments[:1]:
+                directed_segments = (segment, (segment[1], segment[0]))
+                for directed_segment in directed_segments:
+                    for candidate in candidate_tiles(
+                        base_points,
+                        directed_segment,
+                        allow_reflection,
+                        key_precision,
+                        allowed_length_pairs,
+                        length_tolerance,
+                    ):
+                        if not valid_candidate(candidate, patch, area_tolerance, contact_tolerance):
+                            continue
+                        next_tiles = state.tiles + (candidate,)
+                        next_state = State(next_tiles, state.depth + 1, state.path_keys)
+                        key = state_key(next_state, key_precision)
+                        if key in state.path_keys:
+                            continue
+                        next_state = State(next_tiles, state.depth + 1, state.path_keys | {key})
+                        next_items.append((boundary_length_after(candidate, patch), next_state))
+
+                        if len(next_items) >= max_states * 20:
+                            break
                     if len(next_items) >= max_states * 20:
                         break
                 if len(next_items) >= max_states * 20:
                     break
-            if len(next_items) >= max_states * 20:
-                break
-        next_items.sort(key=lambda item: item[0])
-        stack.extend(reversed([next_state for _, next_state in next_items]))
+            next_items.sort(key=lambda item: item[0])
+            stack.extend(reversed([next_state for _, next_state in next_items]))
 
     return exported, expanded
 
@@ -541,7 +551,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("-o", "--output-dir", type=Path, default=Path("outputs/dfs"), help="directory for per-state PNGs")
     parser.add_argument("--allow-reflection", action="store_true", help="also try reflected copies of the tile")
     parser.add_argument("--max-tiles", type=int, default=8, help="maximum tiles in a patch")
-    parser.add_argument("--max-states", type=int, default=100, help="maximum DFS states to export")
+    parser.add_argument("--max-states", type=int, default=100, help="maximum DFS states to expand")
+    parser.add_argument("--export-every", type=int, default=1, help="export one PNG every N expanded DFS states")
     parser.add_argument("--area-tol", type=float, default=1e-7, help="allowed overlap area tolerance")
     parser.add_argument("--contact-tol", type=float, default=1e-6, help="required boundary contact length")
     parser.add_argument("--key-precision", type=int, default=6, help="rounding precision for duplicate state keys")
@@ -575,6 +586,8 @@ def main() -> None:
         raise SystemExit("--max-tiles must be at least 1")
     if args.max_states < 1:
         raise SystemExit("--max-states must be at least 1")
+    if args.export_every < 1:
+        raise SystemExit("--export-every must be at least 1")
     if args.length_tol < 0:
         raise SystemExit("--length-tol must be non-negative")
     if args.bitmap_pixels_per_tile_diameter <= 0:
@@ -600,8 +613,9 @@ def main() -> None:
         args.bitmap_blur_radius_diameters,
         args.allowed_length_pairs,
         args.length_tol,
+        args.export_every,
     )
-    print(f"Exported {exported} DFS states after expanding {expanded} states into {args.output_dir}.")
+    print(f"Exported {exported} PNGs after expanding {expanded} DFS states into {args.output_dir}.")
 
 
 if __name__ == "__main__":
