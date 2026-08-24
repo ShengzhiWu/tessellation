@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageDraw, ImageFilter
 from shapely.geometry import GeometryCollection, LineString, MultiLineString, MultiPolygon, Point as ShapelyPoint, Polygon
 from shapely.ops import snap, unary_union
 
@@ -411,7 +411,7 @@ def boundary_length_after(candidate: Tile, patch) -> float:
     return unary_union([patch, polygon_for(candidate)]).boundary.length
 
 
-def draw_png(state: State, output: Path, show_labels: bool) -> None:
+def draw_png(state: State, output: Path) -> None:
     all_points = [point for tile in state.tiles for point in tile.points]
     min_x = min(x for x, _ in all_points)
     min_y = min(y for _, y in all_points)
@@ -437,24 +437,11 @@ def draw_png(state: State, output: Path, show_labels: bool) -> None:
     thickness = 1
     stroke_width = max(1, round(thickness * supersample))
 
-    for index, tile in enumerate(state.tiles):
+    for tile in state.tiles:
         color = "#8ca8c8" if tile.reflected else "#d9b487"
         screen_points = [screen(point) for point in tile.points]
         draw.polygon(screen_points, fill=color)
         draw.line(screen_points + [screen_points[0]], fill="#17202a", width=stroke_width, joint="curve")
-        if show_labels:
-            cx = sum(x for x, _ in tile.points) / len(tile.points)
-            cy = sum(y for _, y in tile.points) / len(tile.points)
-            sx, sy = screen((cx, cy))
-            label = str(index)
-            font_size = max(10, round(0.18 * scale * supersample))
-            try:
-                font = ImageFont.truetype("arial.ttf", font_size)
-            except OSError:
-                font = ImageFont.load_default()
-            bbox = draw.textbbox((sx, sy), label, font=font, anchor="mm")
-            draw.rectangle(bbox, fill="#fbfaf6")
-            draw.text((sx, sy), label, fill="#17202a", font=font, anchor="mm")
 
     image = image.resize((image_width, image_height), Image.Resampling.BOX)
     image.save(output)
@@ -469,7 +456,6 @@ def dfs_explore(
     area_tolerance: float,
     contact_tolerance: float,
     key_precision: int,
-    show_labels: bool,
     score_mode: str,
     angle_samples: int,
     probe_radius: float,
@@ -496,7 +482,6 @@ def dfs_explore(
         draw_png(
             state,
             output_dir / f"step_{exported:04d}_depth_{state.depth:02d}_tiles_{len(state.tiles):03d}.png",
-            show_labels,
         )
         exported += 1
         expanded += 1
@@ -581,7 +566,6 @@ def parse_args() -> argparse.Namespace:
         default=1.0,
         help="Gaussian blur radius for bitmap scoring, measured in tile diameters",
     )
-    parser.add_argument("--labels", action="store_true", help="label tiles by placement order")
     return parser.parse_args()
 
 
@@ -609,7 +593,6 @@ def main() -> None:
         args.area_tol,
         args.contact_tol,
         args.key_precision,
-        args.labels,
         args.score_mode,
         args.angle_samples,
         args.probe_radius,
