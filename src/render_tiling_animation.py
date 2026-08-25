@@ -294,6 +294,7 @@ def add_stereo_event(
     pan: float,
     sample_rate: int,
     max_delay_seconds: float,
+    gain: float = 1.0,
 ) -> None:
     pan = max(-1.0, min(1.0, pan))
     left_gain = math.sqrt((1.0 - pan) / 2.0)
@@ -302,12 +303,12 @@ def add_stereo_event(
     right_delay = max(0, round(-max_delay_seconds * sample_rate * pan))
     start = round(event_time * sample_rate)
 
-    for channel, gain, delay in ((0, left_gain, left_delay), (1, right_gain, right_delay)):
+    for channel, channel_gain, delay in ((0, left_gain, left_delay), (1, right_gain, right_delay)):
         channel_start = start + delay
         if channel_start >= len(audio):
             continue
         end = min(len(audio), channel_start + len(mono))
-        audio[channel_start:end, channel] += gain * mono[: end - channel_start]
+        audio[channel_start:end, channel] += gain * channel_gain * mono[: end - channel_start]
 
 
 def event_pan(base_points: tuple[Point, ...], state: list[TileInstance], tile: TileInstance) -> float:
@@ -325,42 +326,52 @@ def render_audio(
     end_step: int,
     duration: float,
     sample_rate: int,
-) -> np.ndarray:
-    audio = np.zeros((round(duration * sample_rate), 2), dtype=np.float64)
+) -> tuple[np.ndarray, np.ndarray]:
+    add_audio = np.zeros((round(duration * sample_rate), 2), dtype=np.float64)
+    remove_audio = np.zeros_like(add_audio)
     rng = np.random.default_rng(20260825)
     click = click_sound(sample_rate)
     puff = puff_sound(sample_rate, rng)
     previous = load_state(state_files[start_step])
+    step_seconds = duration / max(end_step - start_step, 1)
 
     for step in range(start_step + 1, end_step + 1):
         current = load_state(state_files[step])
         prefix = common_prefix_length(previous, current)
-        event_time = (step - start_step) / (end_step - start_step) * duration
+        base_event_time = (step - start_step) / (end_step - start_step) * duration
 
         for tile in previous[prefix:]:
+            event_time = base_event_time + rng.uniform(-0.5, 0.5) * step_seconds
             add_stereo_event(
-                audio,
+                remove_audio,
                 puff,
-                event_time,
+                max(0.0, min(duration, event_time)),
                 event_pan(base_points, previous, tile),
                 sample_rate,
                 max_delay_seconds=0.00065,
+                gain=rng.uniform(0.0, 1.0),
             )
         for tile in current[prefix:]:
+            event_time = base_event_time + rng.uniform(-0.5, 0.5) * step_seconds
             add_stereo_event(
-                audio,
+                add_audio,
                 click,
-                event_time,
+                max(0.0, min(duration, event_time)),
                 event_pan(base_points, current, tile),
                 sample_rate,
                 max_delay_seconds=0.00065,
+                gain=rng.uniform(0.0, 1.0),
             )
         previous = current
 
-    peak = float(np.max(np.abs(audio)))
-    if peak > 0:
-        audio *= min(0.95 / peak, 1.0)
-    return audio
+    return add_audio, remove_audio
+
+
+def normalized_audio(audio: np.ndarray, target_peak: float = 0.95) -> np.ndarray:
+    actual_peak = float(np.max(np.abs(audio)))
+    if actual_peak == 0:
+        return audio
+    return audio * (target_peak / actual_peak)
 
 
 def save_wav(path: Path, audio: np.ndarray, sample_rate: int) -> None:
@@ -426,8 +437,9 @@ def render_sequence(args: argparse.Namespace) -> None:
 
     base_points = normalize_base(preset_polygon(args.preset))
     if args.audio_only:
-        audio = render_audio(base_points, state_files, args.start_step, args.end_step, args.duration, args.sample_rate)
-        save_wav(output_dir / args.audio_name, audio, args.sample_rate)
+        add_audio, remove_audio = render_audio(base_points, state_files, args.start_step, args.end_step, args.duration, args.sample_rate)
+        save_wav(output_dir / args.add_audio_name, normalized_audio(add_audio), args.sample_rate)
+        save_wav(output_dir / args.remove_audio_name, normalized_audio(remove_audio), args.sample_rate)
         return
 
     frame_dir.mkdir(parents=True, exist_ok=True)
@@ -441,7 +453,11 @@ def render_sequence(args: argparse.Namespace) -> None:
     camera: Camera | None = None
     for frame_index, frame_state in enumerate(frame_states):
         target = target_camera(base_points, frame_state.tiles, args.width, args.height, args.camera_fill)
-        camera = target if camera is None else smooth_camera(camera, target, args.camera_alpha)
+        camera = (
+            Camera(target.cx, target.cy, target.zoom * args.initial_zoom_factor)
+            if camera is None
+            else smooth_camera(camera, target, args.camera_alpha)
+        )
         render_frame(
             base_points,
             frame_state.tiles,
@@ -466,8 +482,9 @@ def render_sequence(args: argparse.Namespace) -> None:
         if args.progress_every and (frame_index + 1) % args.progress_every == 0:
             print(f"rendered {frame_index + 1}/{frame_count} frames")
 
-    audio = render_audio(base_points, state_files, args.start_step, args.end_step, args.duration, args.sample_rate)
-    save_wav(output_dir / args.audio_name, audio, args.sample_rate)
+    add_audio, remove_audio = render_audio(base_points, state_files, args.start_step, args.end_step, args.duration, args.sample_rate)
+    save_wav(output_dir / args.add_audio_name, normalized_audio(add_audio), args.sample_rate)
+    save_wav(output_dir / args.remove_audio_name, normalized_audio(remove_audio), args.sample_rate)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -484,8 +501,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--supersample", type=int, default=2)
     parser.add_argument("--camera-fill", type=float, default=0.8)
     parser.add_argument("--camera-alpha", type=float, default=0.05)
+    parser.add_argument("--initial-zoom-factor", type=float, default=1.0 / 3.0)
     parser.add_argument("--sample-rate", type=int, default=48000)
-    parser.add_argument("--audio-name", default="sound.wav")
+    parser.add_argument("--add-audio-name", default="add_sound.wav")
+    parser.add_argument("--remove-audio-name", default="remove_sound.wav")
     parser.add_argument("--audio-only", action="store_true", help="render only the WAV file and leave existing frames untouched")
     parser.add_argument("--fill-alpha", type=float, default=0.60)
     parser.add_argument("--noise-alpha-amplitude", type=float, default=0.08)
