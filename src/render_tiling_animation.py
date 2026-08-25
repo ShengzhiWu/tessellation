@@ -425,6 +425,11 @@ def render_sequence(args: argparse.Namespace) -> None:
         raise SystemExit(f"Missing HDF5 state files, first missing step: {missing[0]}")
 
     base_points = normalize_base(preset_polygon(args.preset))
+    if args.audio_only:
+        audio = render_audio(base_points, state_files, args.start_step, args.end_step, args.duration, args.sample_rate)
+        save_wav(output_dir / args.audio_name, audio, args.sample_rate)
+        return
+
     frame_dir.mkdir(parents=True, exist_ok=True)
     for old_frame in frame_dir.glob("frame_*.png"):
         old_frame.unlink()
@@ -481,6 +486,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--camera-alpha", type=float, default=0.05)
     parser.add_argument("--sample-rate", type=int, default=48000)
     parser.add_argument("--audio-name", default="sound.wav")
+    parser.add_argument("--audio-only", action="store_true", help="render only the WAV file and leave existing frames untouched")
     parser.add_argument("--fill-alpha", type=float, default=0.60)
     parser.add_argument("--noise-alpha-amplitude", type=float, default=0.08)
     parser.add_argument("--pulse-alpha-amplitude", type=float, default=0.035)
