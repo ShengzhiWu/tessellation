@@ -651,11 +651,11 @@ def dfs_explore(
                 if should_export:
                     draw_png(
                         state,
-                        output_dir / f"step_{expanded:04d}_tiles_{len(state.tiles):03d}.png",
+                        output_dir / f"step_{expanded}_tiles_{len(state.tiles)}.png",
                     )
                     exported += 1
                 if save_state_h5_files:
-                    save_state_h5(state, output_dir / f"state_{expanded:04d}_tiles_{len(state.tiles):03d}.h5")
+                    save_state_h5(state, output_dir / f"state_{expanded}_tiles_{len(state.tiles)}.h5")
 
                 backjump_to_tiles = ""
                 if len(state.tiles) >= max_tiles:
