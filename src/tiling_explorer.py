@@ -41,7 +41,6 @@ class Tile:
 @dataclass(frozen=True)
 class State:
     tiles: tuple[Tile, ...]
-    depth: int
     path_keys: frozenset[tuple[tuple[tuple[float, float], ...], ...]]
 
 
@@ -202,11 +201,6 @@ def rotate_point(point: Point, angle: float) -> Point:
     return (c * x - s * y, s * x + c * y)
 
 
-def transform_points(points: tuple[Point, ...], reflected: bool, angle: float, dx: float, dy: float) -> tuple[Point, ...]:
-    reflected_points = tuple((-x, y) for x, y in points) if reflected else points
-    return tuple((rx + dx, ry + dy) for rx, ry in (rotate_point(point, angle) for point in reflected_points))
-
-
 def boundary_segments(patch) -> list[tuple[Point, Point]]:
     raw_segments: list[tuple[Point, Point]] = []
 
@@ -256,8 +250,6 @@ def boundary_segments_by_interior_score(
     samples: int,
     probe_radius: float,
 ) -> list[tuple[float, tuple[Point, Point]]]:
-    from shapely.geometry import Point as ShapelyPoint
-
     cache: dict[tuple[float, float], float] = {}
 
     def filled_angle(point: Point) -> float:
@@ -413,26 +405,6 @@ def candidate_tiles(
                 yield Tile(points, reflected, dx, dy, angle)
 
 
-def valid_candidate(
-    candidate: Tile,
-    patch,
-    area_tolerance: float,
-    contact_tolerance: float,
-) -> bool:
-    polygon = polygon_for(candidate)
-    if not polygon.is_valid or polygon.area <= area_tolerance:
-        return False
-    if polygon.intersection(patch).area > area_tolerance:
-        return False
-    snapped_boundary = snap(polygon.boundary, patch.boundary, contact_tolerance)
-    if snapped_boundary.intersection(patch.boundary).length < contact_tolerance:
-        return False
-    combined = unary_union([patch, polygon])
-    if isinstance(combined, MultiPolygon):
-        return False
-    return True
-
-
 def candidate_conflict_indices(
     candidate: Tile,
     state: State,
@@ -571,8 +543,8 @@ def dfs_explore(
     trace_path = output_dir / "trace.csv"
 
     initial_tiles = (Tile(base_points),)
-    initial = State(initial_tiles, 0, frozenset())
-    initial = State(initial.tiles, initial.depth, frozenset({state_key(initial, key_precision)}))
+    initial = State(initial_tiles, frozenset())
+    initial = State(initial.tiles, frozenset({state_key(initial, key_precision)}))
     stack: list[Frame] = [Frame(initial)]
     tile_diameter = point_diameter(base_points)
     exported = 0
@@ -617,11 +589,11 @@ def dfs_explore(
                     if not valid:
                         continue
                     next_tiles = state.tiles + (candidate,)
-                    next_state = State(next_tiles, state.depth + 1, state.path_keys)
+                    next_state = State(next_tiles, state.path_keys)
                     key = state_key(next_state, key_precision)
                     if key in state.path_keys:
                         continue
-                    next_state = State(next_tiles, state.depth + 1, state.path_keys | {key})
+                    next_state = State(next_tiles, state.path_keys | {key})
                     next_items.append((boundary_length_after(candidate, patch), next_state))
 
                     if len(next_items) >= max_states * 20:
