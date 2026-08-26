@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
-from render_tiling_animation import add_stereo_event, click_sound, save_wav
+from bake_audio import add_stereo_event, click_sound, save_wav
 
 
 def export_add_tile_sound(output: Path, sample_rate: int, pan: float) -> None:
