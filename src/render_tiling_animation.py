@@ -41,6 +41,12 @@ class FrameState:
     birth_steps: list[int]
 
 
+@dataclass(frozen=True)
+class RemovalEvent:
+    time: float
+    center: Point
+
+
 def parse_state_files(input_dir: Path) -> dict[int, Path]:
     states: dict[int, Path] = {}
     for path in input_dir.glob("state_*_tiles_*.h5"):
@@ -263,6 +269,55 @@ def render_frame(
     image.save(output)
 
 
+def render_removal_crosses(
+    events: list[RemovalEvent],
+    camera: Camera,
+    output: Path,
+    width: int,
+    height: int,
+    supersample: int,
+    current_time: float,
+    tile_diameter: float,
+    half_life: float,
+    size_diameters: float,
+    stroke_fraction: float,
+) -> None:
+    image = Image.new("RGBA", (width * supersample, height * supersample), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    visible_lifetime = half_life * 8.0
+
+    def screen(point: Point) -> tuple[int, int]:
+        x, y = point
+        return (
+            round(((x - camera.cx) * camera.zoom + width / 2.0) * supersample),
+            round((height / 2.0 - (y - camera.cy) * camera.zoom) * supersample),
+        )
+
+    cross_length = max(4, round(tile_diameter * camera.zoom * size_diameters * supersample))
+    red_width = max(2, round(cross_length * stroke_fraction))
+    black_width = max(red_width + 2, round(red_width * 1.65))
+
+    for event in events:
+        age = current_time - event.time
+        if age < 0.0 or age > visible_lifetime:
+            continue
+        alpha = round(255.0 * math.exp(-math.log(2.0) * age / half_life))
+        if alpha <= 0:
+            continue
+        cx, cy = screen(event.center)
+        half = cross_length // 2
+        first = ((cx - half, cy - half), (cx + half, cy + half))
+        second = ((cx - half, cy + half), (cx + half, cy - half))
+        draw.line(first, fill=(0, 0, 0, alpha), width=black_width)
+        draw.line(second, fill=(0, 0, 0, alpha), width=black_width)
+        draw.line(first, fill=(255, 38, 38, alpha), width=red_width)
+        draw.line(second, fill=(255, 38, 38, alpha), width=red_width)
+
+    image = image.resize((width, height), Image.Resampling.BOX)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    image.save(output)
+
+
 def event_pan(base_points: tuple[Point, ...], state: list[TileInstance], tile: TileInstance) -> float:
     min_x, _, max_x, _ = state_bounds(base_points, state)
     center_x = (min_x + max_x) / 2.0
@@ -295,6 +350,27 @@ def collect_audio_events(
         previous = current
 
     return np.array(add_events, dtype=np.float64).reshape(-1, 3), np.array(remove_events, dtype=np.float64).reshape(-1, 3)
+
+
+def collect_removal_events(
+    base_points: tuple[Point, ...],
+    state_files: dict[int, Path],
+    start_step: int,
+    end_step: int,
+    duration: float,
+) -> list[RemovalEvent]:
+    previous = load_state(state_files[start_step])
+    events: list[RemovalEvent] = []
+
+    for step in range(start_step + 1, end_step + 1):
+        current = load_state(state_files[step])
+        prefix = common_prefix_length(previous, current)
+        base_event_time = (step - start_step) / (end_step - start_step) * duration
+        for tile in previous[prefix:]:
+            events.append(RemovalEvent(base_event_time, tile_centroid(base_points, tile)))
+        previous = current
+
+    return events
 
 
 def save_audio_events(
@@ -360,6 +436,7 @@ def render_sequence(args: argparse.Namespace) -> None:
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
     frame_dir = output_dir / "frames"
+    cross_dir = output_dir / "removal_crosses"
     state_files = parse_state_files(input_dir)
     missing = [step for step in range(args.start_step, args.end_step + 1) if step not in state_files]
     if missing:
@@ -372,15 +449,20 @@ def render_sequence(args: argparse.Namespace) -> None:
         return
 
     frame_dir.mkdir(parents=True, exist_ok=True)
+    cross_dir.mkdir(parents=True, exist_ok=True)
     for old_frame in frame_dir.glob("frame_*.png"):
         old_frame.unlink()
+    for old_cross in cross_dir.glob("frame_*.png"):
+        old_cross.unlink()
 
     frame_count = round(args.duration * args.fps)
     frame_steps = sampled_steps(args.start_step, args.end_step, frame_count)
     frame_states = collect_frame_states(state_files, args.start_step, args.end_step, frame_steps)
+    removal_events = collect_removal_events(base_points, state_files, args.start_step, args.end_step, args.duration)
     tile_diameter = max(math.dist(a, b) for index, a in enumerate(base_points) for b in base_points[index + 1 :])
     camera: Camera | None = None
     for frame_index, frame_state in enumerate(frame_states):
+        current_time = (frame_state.step - args.start_step) / max(args.end_step - args.start_step, 1) * args.duration
         target = target_camera(base_points, frame_state.tiles, args.width, args.height, args.camera_fill)
         camera = (
             Camera(target.cx, target.cy, target.zoom * args.initial_zoom_factor)
@@ -407,6 +489,19 @@ def render_sequence(args: argparse.Namespace) -> None:
             args.pulse_alpha_amplitude,
             args.red_shift,
             args.red_decay_seconds,
+        )
+        render_removal_crosses(
+            removal_events,
+            camera,
+            cross_dir / f"frame_{frame_index}.png",
+            args.width,
+            args.height,
+            args.supersample,
+            current_time,
+            tile_diameter,
+            args.cross_half_life,
+            args.cross_size_diameters,
+            args.cross_stroke_fraction,
         )
         if args.progress_every and (frame_index + 1) % args.progress_every == 0:
             print(f"rendered {frame_index + 1}/{frame_count} frames")
@@ -439,6 +534,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--noise-speed", type=float, default=0.035)
     parser.add_argument("--red-shift", type=float, default=0.10)
     parser.add_argument("--red-decay-seconds", type=float, default=1.1)
+    parser.add_argument("--cross-half-life", type=float, default=0.5)
+    parser.add_argument("--cross-size-diameters", type=float, default=0.35)
+    parser.add_argument("--cross-stroke-fraction", type=float, default=0.23)
     parser.add_argument("--progress-every", type=int, default=50)
     return parser
 
