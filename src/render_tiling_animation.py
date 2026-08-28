@@ -534,7 +534,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--noise-speed", type=float, default=0.035)
     parser.add_argument("--red-shift", type=float, default=0.10)
     parser.add_argument("--red-decay-seconds", type=float, default=1.1)
-    parser.add_argument("--cross-half-life", type=float, default=0.5)
+    parser.add_argument("--cross-half-life", type=float, default=0.15)
     parser.add_argument("--cross-size-diameters", type=float, default=0.35)
     parser.add_argument("--cross-stroke-fraction", type=float, default=0.23)
     parser.add_argument("--progress-every", type=int, default=50)
