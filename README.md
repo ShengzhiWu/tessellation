@@ -20,9 +20,9 @@
 
 当前项目中的相关脚本：
 
-- `src/tile_one_one.py`：生成 $\mathrm{Tile}(1,1)$ 的同手性替换密铺补丁。
-- `src/tile_ab_companion_substitution.py`：生成 $\mathrm{Tile}(a,b)$ 与 $\mathrm{Tile}(b,a)$ 的 companion substitution 补丁。
-- `src/tile_ab.py`：基于论文中的真实 patch 数据，生成 hat 与其镜像块组成的补丁。
+- `src/hat/tile_one_one.py`：生成 $\mathrm{Tile}(1,1)$ 的同手性替换密铺补丁。
+- `src/hat/tile_ab_companion_substitution.py`：生成 $\mathrm{Tile}(a,b)$ 与 $\mathrm{Tile}(b,a)$ 的 companion substitution 补丁。
+- `src/hat/tile_ab.py`：基于论文中的真实 patch 数据，生成 hat 与其镜像块组成的补丁。
 
 ## 镶嵌探索算法
 
