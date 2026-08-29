@@ -20,9 +20,9 @@
 
 当前项目中的相关脚本：
 
-- `src/hat/tile_one_one.py`：生成 $\mathrm{Tile}(1,1)$ 的同手性替换密铺补丁。
-- `src/hat/tile_ab_companion_substitution.py`：生成 $\mathrm{Tile}(a,b)$ 与 $\mathrm{Tile}(b,a)$ 的 companion substitution 补丁。
-- `src/hat/tile_ab.py`：基于论文中的真实 patch 数据，生成 hat 与其镜像块组成的补丁。
+- `src/hat/tile_one_one.py`：生成 $\mathrm{Tile}(1,1)$ 的同手性替换镶嵌。
+- `src/hat/tile_ab_companion_substitution.py`：生成 $\mathrm{Tile}(a,b)$ 与 $\mathrm{Tile}(b,a)$ 的 companion substitution 镶嵌。
+- `src/hat/tile_ab.py`：基于论文中的真实有限片镶嵌数据，生成 hat 与其镜像块组成的镶嵌。
 
 ## 镶嵌探索算法
 
@@ -32,7 +32,7 @@
 
 搜索使用显式 DFS 帧栈，而不是 Python 递归栈。每个栈帧保存一个父状态及其尚未尝试的候选列表，因此回溯或回跳后可以继续尝试同一层的其它摆法。程序还实现了 conflict-directed backjumping：当某条裸露边没有任何可行候选时，记录造成失败的责任块（包括候选块实际重叠到的已有块、提供当前裸露边的块，以及在长边被短边部分占据时共同决定该裸露段的相邻块（短边的所有者）），然后直接回跳到这些责任块中最晚放置的一块之前。
 
-运行时可以导出多种调试数据：PNG 用于观察有限 patch 的形状，`trace.csv` 记录每个展开状态的块数、待尝试分支数、是否导出 PNG、回跳位置和单步耗时，HDF5 文件可逐步保存状态中每块的平移、旋转和镜像标记。当前 hat 实验默认允许镜像；只尝试长度对 $(1,1)$、$(1,2)$、$(2,2)$ 和 $(\sqrt{3},\sqrt{3})$的拼贴，对应的命令行参数写作 `--allowed-length-pairs "1:1,1:2,2:2,sqrt3:sqrt3"`；输出目录为 `outputs/dfs_hat`。
+运行时可以导出多种调试数据：PNG 用于观察当前有限片镶嵌的形状，`trace.csv` 记录每个展开状态的块数、待尝试分支数、是否导出 PNG、回跳位置和单步耗时，HDF5 文件可逐步保存状态中每块的平移、旋转和镜像标记。当前 hat 实验默认允许镜像；只尝试长度对 $(1,1)$、$(1,2)$、$(2,2)$ 和 $(\sqrt{3},\sqrt{3})$的拼贴，对应的命令行参数写作 `--allowed-length-pairs "1:1,1:2,2:2,sqrt3:sqrt3"`；输出目录为 `outputs/dfs_hat`。
 
 ## 搜索算法设想
 
