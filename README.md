@@ -32,7 +32,7 @@
 
 搜索使用显式 DFS 帧栈，而不是 Python 递归栈。每个栈帧保存一个父状态及其尚未尝试的候选列表，因此回溯或回跳后可以继续尝试同一层的其它摆法。程序还实现了 conflict-directed backjumping：当某条裸露边没有任何可行候选时，记录造成失败的责任块（包括候选块实际重叠到的已有块、提供当前裸露边的块，以及在长边被短边部分占据时共同决定该裸露段的相邻块（短边的所有者）），然后直接回跳到这些责任块中最晚放置的一块之前。
 
-运行时可以导出多种调试数据：PNG 用于观察当前有限片镶嵌的形状，`trace.csv` 记录每个展开状态的块数、待尝试分支数、是否导出 PNG、回跳位置和单步耗时，HDF5 文件可逐步保存状态中每块的平移、旋转和镜像标记。当前 hat 实验默认允许镜像；只尝试长度对 $(1,1)$、$(1,2)$、$(2,2)$ 和 $(\sqrt{3},\sqrt{3})$的拼贴，对应的命令行参数写作 `--allowed-length-pairs "1:1,1:2,2:2,sqrt3:sqrt3"`；输出目录为 `outputs/dfs_hat`。
+运行时可以导出多种调试数据：PNG 用于观察当前有限片镶嵌的形状，`trace.csv` 记录每个展开状态的块数、待尝试分支数、是否导出 PNG、回跳位置和单步耗时，HDF5 文件可逐步保存状态中每块的平移、旋转和镜像标记。以 hat 为例，若允许镜像并只尝试长度对 $(1,1)$、$(1,2)$、$(2,2)$ 和 $(\sqrt{3},\sqrt{3})$ 的拼贴，对应的命令行参数可写作 `--allowed-length-pairs "1:1,1:2,2:2,sqrt3:sqrt3"`；输出目录由 `--output-dir` 指定。
 
 ## 搜索算法设想
 
@@ -49,3 +49,13 @@
 7. 对剩余候选，计算真实 Voronoi 多边形并合并对应 cell，导出图片供人工筛选。
 
 torus exact cover 可用来搜索周期铺法：把周期图按两个独立平移向量取有限商，也就是把一个超胞的相对边周期性粘起来，然后在这个 torus 上做 exact cover。实现时可用按面积从小到大枚举。若找到解，则候选存在周期密铺，淘汰。
+
+## 动画和音频渲染
+
+本项目的代码还可以将镶嵌探索算法的输出渲染为动画（图像序列）和音频。
+
+动画和音频渲染所需的输入是 `src/tiling_explorer.py --save-state-h5` 生成的一组逐步状态文件。渲染时先调用 `src/render_tiling_animation.py`，传入状态目录、输出目录和时间范围，例如 `python src/render_tiling_animation.py --input-dir <state-dir> --output-dir <animation-dir> --start-step <first> --end-step <last>`（尖括号及其内容是你要根据本地具体情况替换的，请勿原样使用）。脚本会输出主画面 PNG 序列到 `<animation-dir>/frames`，把消失块的红叉输出为透明背景 PNG 序列到 `<animation-dir>/removal_crosses`，并生成 `<animation-dir>/audio_events.h5` 作为音频事件缓存。
+
+`src/render_tiling_animation.py`包含若干参数。渲染时虚拟相机会根据当前已铺范围自适应地平移和缩放，可以用 `--camera-alpha` 控制过渡的快慢。主要时间和画面参数包括 `--duration`、`--fps`、`--width`、`--height`、`--time-gamma`、`--cross-half-life`；其中 `--time-gamma` 用来让搜索时间前慢后快。块使用半透明黄/蓝填充和同色实线边缘，新出现的块会短暂偏红，消失的块会在独立叉图层显示红色填充、黑色边线的叉。
+
+有了`src/render_tiling_animation.py`导出的音频事件缓存文件，就可以调用 `src/bake_audio.py` 烘焙出音频，例如 `python src/bake_audio.py --events <animation-dir>/audio_events.h5 --output-dir <animation-dir>`。它会输出添加块和删除块两条 WAV 音轨；烘焙阶段会给事件加入可调的随机时间抖动和左右声道到达时间差以产生立体声效果。设计音频事件缓存文件的目的是在调整音色、抖动或声像参数时，不需要重新读取大量逐步状态文件（这通常很耗时）。
