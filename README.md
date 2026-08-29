@@ -93,3 +93,9 @@ python src/render_tiling_animation.py --input-dir outputs/example-hat-search --o
 ```bash
 python src/bake_audio.py --events outputs/example-hat-animation/audio_events.h5 --output-dir outputs/example-hat-animation
 ```
+
+## 参考文献
+
+- David Smith, Joseph Samuel Myers, Craig S. Kaplan, Chaim Goodman-Strauss, [An aperiodic monotile](https://arxiv.org/abs/2303.10798), 2023.
+- David Smith, Joseph Samuel Myers, Craig S. Kaplan, Chaim Goodman-Strauss, [A chiral aperiodic monotile](https://arxiv.org/abs/2305.17743), 2023.
+- Craig S. Kaplan, [Hat monotile resources](https://cs.uwaterloo.ca/~csk/hat/).
