@@ -37,6 +37,7 @@ class Camera:
 @dataclass(frozen=True)
 class FrameState:
     step: int
+    time: float
     tiles: list[TileInstance]
     birth_steps: list[int]
 
@@ -119,6 +120,16 @@ def smooth_camera(current: Camera, target: Camera, alpha: float) -> Camera:
     )
 
 
+def time_to_step_progress(time_progress: float, gamma: float) -> float:
+    return max(0.0, min(1.0, time_progress)) ** gamma
+
+
+def step_to_time_progress(step_progress: float, gamma: float) -> float:
+    if gamma <= 0:
+        raise ValueError("time gamma must be positive")
+    return max(0.0, min(1.0, step_progress)) ** (1.0 / gamma)
+
+
 def lerp(first: float, second: float, amount: float) -> float:
     return first * (1.0 - amount) + second * amount
 
@@ -172,10 +183,11 @@ def tile_style(
     base_points: tuple[Point, ...],
     tile: TileInstance,
     birth_step: int,
-    current_step: int,
-    current_time: float,
+    start_step: int,
     end_step: int,
+    current_time: float,
     duration: float,
+    time_gamma: float,
     tile_diameter: float,
     noise_spatial_scale: float,
     noise_speed: float,
@@ -186,7 +198,9 @@ def tile_style(
     red_decay_seconds: float,
 ) -> tuple[tuple[int, int, int], int]:
     base_color = (74, 163, 255) if tile.reflected else (255, 213, 74)
-    age_seconds = max(0.0, (current_step - birth_step) / max(end_step, 1) * duration)
+    birth_progress = (birth_step - start_step) / max(end_step - start_step, 1)
+    birth_time = step_to_time_progress(birth_progress, time_gamma) * duration
+    age_seconds = max(0.0, current_time - birth_time)
     color = blend_rgb(base_color, (255, 48, 48), red_shift * math.exp(-age_seconds / red_decay_seconds))
 
     centroid_x, centroid_y = tile_centroid(base_points, tile)
@@ -210,9 +224,11 @@ def render_frame(
     width: int,
     height: int,
     supersample: int,
-    current_step: int,
+    start_step: int,
     end_step: int,
     duration: float,
+    time_gamma: float,
+    current_time: float,
     tile_diameter: float,
     noise_spatial_scale: float,
     noise_speed: float,
@@ -225,7 +241,6 @@ def render_frame(
     image = Image.new("RGBA", (width * supersample, height * supersample), (0, 0, 0, 255))
     fill_layer = Image.new("RGBA", image.size, (0, 0, 0, 0))
     fill_draw = ImageDraw.Draw(fill_layer)
-    current_time = current_step / max(end_step, 1) * duration
 
     def screen(point: Point) -> tuple[int, int]:
         x, y = point
@@ -241,10 +256,11 @@ def render_frame(
             base_points,
             tile,
             birth_step,
-            current_step,
-            current_time,
+            start_step,
             end_step,
+            current_time,
             duration,
+            time_gamma,
             tile_diameter,
             noise_spatial_scale,
             noise_speed,
@@ -332,6 +348,7 @@ def collect_audio_events(
     start_step: int,
     end_step: int,
     duration: float,
+    time_gamma: float,
 ) -> tuple[np.ndarray, np.ndarray]:
     rng = np.random.default_rng(20260825)
     previous = load_state(state_files[start_step])
@@ -341,7 +358,8 @@ def collect_audio_events(
     for step in range(start_step + 1, end_step + 1):
         current = load_state(state_files[step])
         prefix = common_prefix_length(previous, current)
-        base_event_time = (step - start_step) / (end_step - start_step) * duration
+        step_progress = (step - start_step) / (end_step - start_step)
+        base_event_time = step_to_time_progress(step_progress, time_gamma) * duration
 
         for tile in previous[prefix:]:
             remove_events.append((base_event_time, event_pan(base_points, previous, tile), rng.uniform(0.0, 1.0)))
@@ -358,6 +376,7 @@ def collect_removal_events(
     start_step: int,
     end_step: int,
     duration: float,
+    time_gamma: float,
 ) -> list[RemovalEvent]:
     previous = load_state(state_files[start_step])
     events: list[RemovalEvent] = []
@@ -365,7 +384,8 @@ def collect_removal_events(
     for step in range(start_step + 1, end_step + 1):
         current = load_state(state_files[step])
         prefix = common_prefix_length(previous, current)
-        base_event_time = (step - start_step) / (end_step - start_step) * duration
+        step_progress = (step - start_step) / (end_step - start_step)
+        base_event_time = step_to_time_progress(step_progress, time_gamma) * duration
         for tile in previous[prefix:]:
             events.append(RemovalEvent(base_event_time, tile_centroid(base_points, tile)))
         previous = current
@@ -380,6 +400,7 @@ def save_audio_events(
     start_step: int,
     end_step: int,
     duration: float,
+    time_gamma: float,
 ) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     with h5py.File(output, "w") as file:
@@ -389,14 +410,22 @@ def save_audio_events(
         file.attrs["start_step"] = start_step
         file.attrs["end_step"] = end_step
         file.attrs["duration"] = duration
+        file.attrs["time_gamma"] = time_gamma
 
 
-def sampled_steps(start_step: int, end_step: int, frame_count: int) -> list[int]:
+def sampled_frame_times(duration: float, frame_count: int) -> list[float]:
     if frame_count == 1:
-        return [start_step]
+        return [0.0]
     return [
-        round(start_step + frame_index * (end_step - start_step) / (frame_count - 1))
+        frame_index * duration / (frame_count - 1)
         for frame_index in range(frame_count)
+    ]
+
+
+def sampled_steps(start_step: int, end_step: int, frame_times: list[float], duration: float, time_gamma: float) -> list[int]:
+    return [
+        round(start_step + time_to_step_progress(frame_time / duration, time_gamma) * (end_step - start_step))
+        for frame_time in frame_times
     ]
 
 
@@ -405,6 +434,7 @@ def collect_frame_states(
     start_step: int,
     end_step: int,
     frame_steps: list[int],
+    frame_times: list[float],
 ) -> list[FrameState]:
     requested: dict[int, list[int]] = {}
     for frame_index, step in enumerate(frame_steps):
@@ -415,7 +445,7 @@ def collect_frame_states(
     current_birth_steps = [start_step] * len(previous)
     if start_step in requested:
         for frame_index in requested[start_step]:
-            frames[frame_index] = FrameState(start_step, list(previous), list(current_birth_steps))
+            frames[frame_index] = FrameState(start_step, frame_times[frame_index], list(previous), list(current_birth_steps))
 
     for step in range(start_step + 1, end_step + 1):
         current = load_state(state_files[step])
@@ -423,7 +453,7 @@ def collect_frame_states(
         current_birth_steps = current_birth_steps[:prefix] + [step] * (len(current) - prefix)
         if step in requested:
             for frame_index in requested[step]:
-                frames[frame_index] = FrameState(step, list(current), list(current_birth_steps))
+                frames[frame_index] = FrameState(step, frame_times[frame_index], list(current), list(current_birth_steps))
         previous = current
 
     missing_frames = [index for index, frame in enumerate(frames) if frame is None]
@@ -444,8 +474,23 @@ def render_sequence(args: argparse.Namespace) -> None:
 
     base_points = normalize_base(preset_polygon(args.preset))
     if args.events_only:
-        add_events, remove_events = collect_audio_events(base_points, state_files, args.start_step, args.end_step, args.duration)
-        save_audio_events(output_dir / args.events_name, add_events, remove_events, args.start_step, args.end_step, args.duration)
+        add_events, remove_events = collect_audio_events(
+            base_points,
+            state_files,
+            args.start_step,
+            args.end_step,
+            args.duration,
+            args.time_gamma,
+        )
+        save_audio_events(
+            output_dir / args.events_name,
+            add_events,
+            remove_events,
+            args.start_step,
+            args.end_step,
+            args.duration,
+            args.time_gamma,
+        )
         return
 
     frame_dir.mkdir(parents=True, exist_ok=True)
@@ -456,13 +501,20 @@ def render_sequence(args: argparse.Namespace) -> None:
         old_cross.unlink()
 
     frame_count = round(args.duration * args.fps)
-    frame_steps = sampled_steps(args.start_step, args.end_step, frame_count)
-    frame_states = collect_frame_states(state_files, args.start_step, args.end_step, frame_steps)
-    removal_events = collect_removal_events(base_points, state_files, args.start_step, args.end_step, args.duration)
+    frame_times = sampled_frame_times(args.duration, frame_count)
+    frame_steps = sampled_steps(args.start_step, args.end_step, frame_times, args.duration, args.time_gamma)
+    frame_states = collect_frame_states(state_files, args.start_step, args.end_step, frame_steps, frame_times)
+    removal_events = collect_removal_events(
+        base_points,
+        state_files,
+        args.start_step,
+        args.end_step,
+        args.duration,
+        args.time_gamma,
+    )
     tile_diameter = max(math.dist(a, b) for index, a in enumerate(base_points) for b in base_points[index + 1 :])
     camera: Camera | None = None
     for frame_index, frame_state in enumerate(frame_states):
-        current_time = (frame_state.step - args.start_step) / max(args.end_step - args.start_step, 1) * args.duration
         target = target_camera(base_points, frame_state.tiles, args.width, args.height, args.camera_fill)
         camera = (
             Camera(target.cx, target.cy, target.zoom * args.initial_zoom_factor)
@@ -478,9 +530,11 @@ def render_sequence(args: argparse.Namespace) -> None:
             args.width,
             args.height,
             args.supersample,
-            frame_state.step,
+            args.start_step,
             args.end_step,
             args.duration,
+            args.time_gamma,
+            frame_state.time,
             tile_diameter,
             args.noise_spatial_scale,
             args.noise_speed,
@@ -497,7 +551,7 @@ def render_sequence(args: argparse.Namespace) -> None:
             args.width,
             args.height,
             args.supersample,
-            current_time,
+            frame_state.time,
             tile_diameter,
             args.cross_half_life,
             args.cross_size_diameters,
@@ -506,8 +560,23 @@ def render_sequence(args: argparse.Namespace) -> None:
         if args.progress_every and (frame_index + 1) % args.progress_every == 0:
             print(f"rendered {frame_index + 1}/{frame_count} frames")
 
-    add_events, remove_events = collect_audio_events(base_points, state_files, args.start_step, args.end_step, args.duration)
-    save_audio_events(output_dir / args.events_name, add_events, remove_events, args.start_step, args.end_step, args.duration)
+    add_events, remove_events = collect_audio_events(
+        base_points,
+        state_files,
+        args.start_step,
+        args.end_step,
+        args.duration,
+        args.time_gamma,
+    )
+    save_audio_events(
+        output_dir / args.events_name,
+        add_events,
+        remove_events,
+        args.start_step,
+        args.end_step,
+        args.duration,
+        args.time_gamma,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -519,6 +588,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--end-step", type=int, default=19800)
     parser.add_argument("--duration", type=float, default=60.0)
     parser.add_argument("--fps", type=float, default=30.0)
+    parser.add_argument("--time-gamma", type=float, default=2.0)
     parser.add_argument("--width", type=int, default=1920)
     parser.add_argument("--height", type=int, default=1080)
     parser.add_argument("--supersample", type=int, default=2)
