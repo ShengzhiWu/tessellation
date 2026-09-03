@@ -16,7 +16,7 @@ import math
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 from PIL import Image, ImageDraw, ImageFilter
 from shapely.geometry import GeometryCollection, LineString, MultiLineString, MultiPolygon, Point as ShapelyPoint, Polygon
@@ -49,6 +49,9 @@ class Frame:
     state: State
     choices: list[State] | None = None
     next_index: int = 0
+    selected_segment: tuple[Point, Point] | None = None
+    conflict_indices: set[int] | None = None
+    backjump_to_tiles: int | None = None
 
 
 def preset_polygon(name: str) -> tuple[Point, ...]:
@@ -377,6 +380,25 @@ def candidate_tiles(
     allowed_length_pairs: tuple[tuple[float, float], ...] | None,
     length_tolerance: float,
 ) -> Iterable[Tile]:
+    for tile, _, _, _, _ in candidate_tiles_with_metadata(
+        base_points,
+        segment,
+        allow_reflection,
+        dedupe_precision,
+        allowed_length_pairs,
+        length_tolerance,
+    ):
+        yield tile
+
+
+def candidate_tiles_with_metadata(
+    base_points: tuple[Point, ...],
+    segment: tuple[Point, Point],
+    allow_reflection: bool,
+    dedupe_precision: int,
+    allowed_length_pairs: tuple[tuple[float, float], ...] | None,
+    length_tolerance: float,
+) -> Iterable[tuple[Tile, int, int, float, float]]:
     a, b = segment
     boundary_angle = math.atan2(b[1] - a[1], b[0] - a[0])
     boundary_length = math.dist(a, b)
@@ -384,8 +406,9 @@ def candidate_tiles(
 
     for reflected in ([False, True] if allow_reflection else [False]):
         source_points = tuple((-x, y) for x, y in base_points) if reflected else base_points
-        for p, q in edges(source_points):
-            if not length_pair_allowed(boundary_length, math.dist(p, q), allowed_length_pairs, length_tolerance):
+        for edge_index, (p, q) in enumerate(edges(source_points)):
+            source_length = math.dist(p, q)
+            if not length_pair_allowed(boundary_length, source_length, allowed_length_pairs, length_tolerance):
                 continue
             tile_angle = math.atan2(q[1] - p[1], q[0] - p[0])
             angle = boundary_angle + math.pi - tile_angle
@@ -396,13 +419,13 @@ def candidate_tiles(
                 (a[0] - rotated_q[0], a[1] - rotated_q[1]),
                 (b[0] - rotated_p[0], b[1] - rotated_p[1]),
             )
-            for dx, dy in alignments:
+            for alignment_index, (dx, dy) in enumerate(alignments):
                 points = tuple((rx + dx, ry + dy) for rx, ry in (rotate_point(point, angle) for point in source_points))
                 key = tuple(sorted((round(x, dedupe_precision), round(y, dedupe_precision)) for x, y in points))
                 if key in seen:
                     continue
                 seen.add(key)
-                yield Tile(points, reflected, dx, dy, angle)
+                yield Tile(points, reflected, dx, dy, angle), edge_index, alignment_index, boundary_length, source_length
 
 
 def candidate_conflict_indices(
@@ -534,6 +557,7 @@ def dfs_explore(
     length_tolerance: float,
     export_every: int,
     save_state_h5_files: bool,
+    on_backtrack: Callable[[State, tuple[Point, Point] | None, set[int], int | None], None] | None = None,
 ) -> tuple[int, int]:
     output_dir.mkdir(parents=True, exist_ok=True)
     old_outputs = tuple(output_dir.glob("step_*.png")) + tuple(output_dir.glob("step_*.svg")) + tuple(output_dir.glob("state_*.h5"))
@@ -553,10 +577,11 @@ def dfs_explore(
     def pending_choice_count() -> int:
         return sum(max(0, len(frame.choices) - frame.next_index) for frame in stack if frame.choices is not None)
 
-    def generate_choices(state: State) -> tuple[list[State], set[int]]:
+    def generate_choices(state: State) -> tuple[list[State], set[int], tuple[Point, Point] | None]:
         patch = patch_union(state)
         next_items: list[tuple[float, State]] = []
         conflict_indices: set[int] = set()
+        selected_segment: tuple[Point, Point] | None = None
         if score_mode == "angle":
             scored_segments = boundary_segments_by_interior_score(patch, angle_samples, probe_radius)
         else:
@@ -567,6 +592,7 @@ def dfs_explore(
                 bitmap_blur_radius_diameters,
             )
         for _, segment in scored_segments[:1]:
+            selected_segment = segment
             conflict_indices.update(segment_provider_indices(state, segment, contact_tolerance))
             directed_segments = (segment, (segment[1], segment[0]))
             for directed_segment in directed_segments:
@@ -603,7 +629,7 @@ def dfs_explore(
             if len(next_items) >= max_states * 20:
                 break
         next_items.sort(key=lambda item: item[0])
-        return [next_state for _, next_state in next_items], conflict_indices
+        return [next_state for _, next_state in next_items], conflict_indices, selected_segment
 
     def backjump_to_tile(tile_index: int) -> None:
         while stack and len(stack[-1].state.tiles) > tile_index:
@@ -633,10 +659,20 @@ def dfs_explore(
                 if len(state.tiles) >= max_tiles:
                     frame.choices = []
                 else:
-                    frame.choices, conflict_indices = generate_choices(state)
+                    frame.choices, conflict_indices, selected_segment = generate_choices(state)
+                    frame.selected_segment = selected_segment
+                    frame.conflict_indices = conflict_indices
                     if not frame.choices and conflict_indices:
                         latest_conflict = max(conflict_indices)
                         backjump_to_tiles = latest_conflict
+                        frame.backjump_to_tiles = latest_conflict
+                    if not frame.choices and on_backtrack is not None:
+                        on_backtrack(
+                            state,
+                            frame.selected_segment,
+                            frame.conflict_indices or set(),
+                            frame.backjump_to_tiles,
+                        )
 
                 step_ms = (time.perf_counter() - step_start) * 1000.0
                 trace.writerow((expanded, len(state.tiles), pending_choice_count(), int(should_export), backjump_to_tiles, f"{step_ms:.3f}"))
@@ -649,6 +685,13 @@ def dfs_explore(
                 continue
 
             if frame.next_index >= len(frame.choices):
+                if on_backtrack is not None:
+                    on_backtrack(
+                        frame.state,
+                        frame.selected_segment,
+                        frame.conflict_indices or set(),
+                        frame.backjump_to_tiles,
+                    )
                 stack.pop()
                 continue
 
