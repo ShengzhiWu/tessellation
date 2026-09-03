@@ -446,10 +446,11 @@ def candidate_conflict_indices(
     if conflicts:
         return False, tuple(conflicts)
 
-    snapped_boundary = snap(polygon.boundary, patch.boundary, contact_tolerance)
+    snapped_polygon = snap(polygon, patch, contact_tolerance)
+    snapped_boundary = snapped_polygon.boundary
     if snapped_boundary.intersection(patch.boundary).length < contact_tolerance:
         return False, ()
-    combined = unary_union([patch, polygon])
+    combined = unary_union([patch, snapped_polygon])
     if isinstance(combined, MultiPolygon):
         return False, ()
     return True, ()

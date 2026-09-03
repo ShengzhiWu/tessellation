@@ -336,13 +336,14 @@ def candidate_rejection_reason(
         details["conflicts"] = conflicts
         return "overlap", details
 
-    snapped_boundary = explorer.snap(polygon.boundary, patch.boundary, contact_tolerance)
+    snapped_polygon = explorer.snap(polygon, patch, contact_tolerance)
+    snapped_boundary = snapped_polygon.boundary
     contact_length = snapped_boundary.intersection(patch.boundary).length
     details["contact_length"] = contact_length
     if contact_length < contact_tolerance:
         return "insufficient_contact", details
 
-    combined = explorer.unary_union([patch, polygon])
+    combined = explorer.unary_union([patch, snapped_polygon])
     if isinstance(combined, explorer.MultiPolygon):
         return "multipolygon", details
 
