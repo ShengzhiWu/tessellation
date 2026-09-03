@@ -42,6 +42,8 @@ python src/hat/tile_ab_companion_substitution.py -n 4 --a 1 --b 1.73205080756887
 
 ## 镶嵌探索算法
 
+### DFS算法
+
 `src/tiling_explorer.py` 实现了一个从单块多边形出发的自动镶嵌探索程序。它像人工试拼一样探索，每一步选择一条裸露边，枚举新砖的边与它贴合的所有候选位置，过滤掉发生面积重叠或不满足长度组合限制的候选，然后沿深度优先搜索继续生长。
 
 裸露边的选择使用“凹陷度”启发式。当前默认方法是把已放置区域低分辨率栅格化成二值图，已放置区域为黑色、背景为白色，再做高斯模糊；裸露边中点在模糊图上的灰度越黑，说明它越处在凹陷区域，越优先检查。旧的端点填充角指标仍保留为可选模式。优先检查凹陷处不是数学约束，而是为了更早发现局部矛盾：只要当前块的某条裸露边无法接上任何新砖，当前拼法就不可能扩展成完整镶嵌。
@@ -55,6 +57,25 @@ python src/hat/tile_ab_companion_substitution.py -n 4 --a 1 --b 1.73205080756887
 ```bash
 python src/tiling_explorer.py --preset hat --allow-reflection --allowed-length-pairs "1:1,1:2,2:2,sqrt3:sqrt3" --max-tiles 300 --max-states 20000 --export-every 100 --save-state-h5 --output-dir outputs/example-hat-search
 ```
+
+### DFS 程序诊断程序
+
+有的时候 DFS 程序实现会有疏漏，导致把存在正确拼法的分支剪枝。为了高效 debug，可以用一个已知的有限的镶嵌来检查 DFS 是否会把它剪掉，以及剪掉的原因。
+
+`src/validate_dfs_against_known_tiling.py` 用一个已知的构造式有限镶嵌校验 DFS 是否错误回退。它会把参考镶嵌中的某个中心块对齐到 DFS 起点，截取一片足够大的参考区域，然后运行真实的 DFS；每次 DFS 准备回退时，脚本检查当前有限片镶嵌是否仍是参考镶嵌的子集，以及当前待处理边是否仍能由参考镶嵌继续填充。如果二者成立，脚本会保存现场 HDF5、叠图 PNG 和候选诊断 JSON，便于定位候选枚举、碰撞判断或剪枝逻辑的问题。
+
+最初开发此诊断程序时，使用的参考来源是 `src/hat/tile_one_one.py` 的 $\mathrm{Tile}(1,1)$ 构造式镶嵌。
+
+调用示例：
+
+```bash
+python src/validate_dfs_against_known_tiling.py --known-source tile11-substitution --iterations 3 --allowed-length-pairs "1:1,1:2,2:2" --max-states 20000 --output-dir outputs/example-dfs-validation
+```
+
+### 坑
+
+- eb1cff6e3d80fa22628ea1731d9d41b8ba5f3e86 这次 commit 前，接触长度用吸附到当前边界后的几何计算，但连通性仍用未吸附的原始候选计算，导致数值上的极小缝隙把合法候选误判成多个不连通多边形。
+- 29fcaa07395849fb46ccf421e52b650f25db21e7 这次 commit 前，在候选通过了吸附后的检查后，仍把未吸附的原始候选保存进后续状态，导致极细裂缝累积，并在之后的边界提取中变成伪裸露边。现在接触判断、连通判断和后续状态保存都使用同一套吸附后的候选几何。
 
 ## 搜索算法设想
 
