@@ -446,7 +446,7 @@ def candidate_conflict_indices(
     if conflicts:
         return False, tuple(conflicts)
 
-    snapped_polygon = snap(polygon, patch, contact_tolerance)
+    snapped_polygon = polygon_for(snap_tile_to_patch(candidate, patch, contact_tolerance))
     snapped_boundary = snapped_polygon.boundary
     if snapped_boundary.intersection(patch.boundary).length < contact_tolerance:
         return False, ()
@@ -454,6 +454,17 @@ def candidate_conflict_indices(
     if isinstance(combined, MultiPolygon):
         return False, ()
     return True, ()
+
+
+def snap_tile_to_patch(candidate: Tile, patch, tolerance: float) -> Tile:
+    snapped = snap(polygon_for(candidate), patch, tolerance)
+    if not isinstance(snapped, Polygon):
+        return candidate
+    points = tuple((float(x), float(y)) for x, y in list(snapped.exterior.coords)[:-1])
+    points = remove_collinear_vertices(points)
+    if len(points) < 3:
+        return candidate
+    return Tile(points, candidate.reflected, candidate.x, candidate.y, candidate.angle)
 
 
 def collinear_touching_segments(
@@ -615,13 +626,14 @@ def dfs_explore(
                     conflict_indices.update(conflicts)
                     if not valid:
                         continue
-                    next_tiles = state.tiles + (candidate,)
+                    snapped_candidate = snap_tile_to_patch(candidate, patch, contact_tolerance)
+                    next_tiles = state.tiles + (snapped_candidate,)
                     next_state = State(next_tiles, state.path_keys)
                     key = state_key(next_state, key_precision)
                     if key in state.path_keys:
                         continue
                     next_state = State(next_tiles, state.path_keys | {key})
-                    next_items.append((boundary_length_after(candidate, patch), next_state))
+                    next_items.append((boundary_length_after(snapped_candidate, patch), next_state))
 
                     if len(next_items) >= max_states * 20:
                         break
