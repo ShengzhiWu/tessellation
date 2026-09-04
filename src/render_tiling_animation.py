@@ -618,8 +618,8 @@ def render_sequence(args: argparse.Namespace) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input-dir", default="outputs/dfs_hat", help="directory containing state_*_tiles_*.h5 files")
-    parser.add_argument("--output-dir", default="outputs/dfs_hat_animation", help="directory for frames and audio")
+    parser.add_argument("--input-dir", default="outputs/dfs_result", help="directory containing state_*_tiles_*.h5 files")
+    parser.add_argument("--output-dir", default="outputs/animation", help="directory for frames and audio")
     parser.add_argument("--frames-name", default="frames", help="subdirectory name for main PNG frames")
     parser.add_argument("--preset", choices=("hat", "tile11", "square"), default="hat")
     parser.add_argument("--start-step", type=int, default=0)

@@ -146,8 +146,8 @@ def bake_audio(args: argparse.Namespace) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--events", default="outputs/dfs_hat_animation/audio_events.h5")
-    parser.add_argument("--output-dir", default="outputs/dfs_hat_animation")
+    parser.add_argument("--events", default="outputs/animation/audio_events.h5")
+    parser.add_argument("--output-dir", default="outputs/animation")
     parser.add_argument("--sample-rate", type=int, default=48000)
     parser.add_argument("--add-audio-name", default="add_sound.wav")
     parser.add_argument("--remove-audio-name", default="remove_sound.wav")

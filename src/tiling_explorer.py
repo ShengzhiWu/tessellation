@@ -720,7 +720,7 @@ def parse_args() -> argparse.Namespace:
     source = parser.add_mutually_exclusive_group()
     source.add_argument("--polygon", type=Path, help="JSON file containing [[x,y], ...] polygon vertices")
     source.add_argument("--preset", choices=("hat", "tile11", "square"), default="hat", help="built-in polygon preset")
-    parser.add_argument("-o", "--output-dir", type=Path, default=Path("outputs/dfs"), help="directory for per-state PNGs")
+    parser.add_argument("-o", "--output-dir", type=Path, default=Path("outputs/dfs_result"), help="directory for per-state PNGs")
     parser.add_argument("--allow-reflection", action="store_true", help="also try reflected copies of the tile")
     parser.add_argument("--max-tiles", type=int, default=8, help="maximum tiles in a patch")
     parser.add_argument("--max-states", type=int, default=100, help="maximum DFS states to expand")
