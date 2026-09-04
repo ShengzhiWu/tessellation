@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import colorsys
 import math
 import re
 from dataclasses import dataclass
@@ -179,6 +180,21 @@ def blend_rgb(first: tuple[int, int, int], second: tuple[int, int, int], amount:
     return tuple(round(lerp(a, b, amount)) for a, b in zip(first, second))
 
 
+def parse_hex_color(value: str) -> tuple[int, int, int]:
+    text = value.strip()
+    if text.startswith("#"):
+        text = text[1:]
+    if len(text) != 6:
+        raise ValueError(f"Expected a 6-digit hex color, got {value!r}")
+    return tuple(int(text[index : index + 2], 16) for index in (0, 2, 4))
+
+
+def hsl_to_rgb(hue_degrees: float, saturation: float, lightness: float) -> tuple[int, int, int]:
+    hue = (hue_degrees % 360.0) / 360.0
+    red, green, blue = colorsys.hls_to_rgb(hue, lightness, saturation)
+    return (round(red * 255), round(green * 255), round(blue * 255))
+
+
 def tile_style(
     base_points: tuple[Point, ...],
     tile: TileInstance,
@@ -196,8 +212,14 @@ def tile_style(
     pulse_alpha_amplitude: float,
     red_shift: float,
     red_decay_seconds: float,
+    color_mode: str,
+    angle_saturation: float,
+    angle_lightness: float,
 ) -> tuple[tuple[int, int, int], int]:
-    base_color = (74, 163, 255) if tile.reflected else (255, 213, 74)
+    if color_mode == "angle":
+        base_color = hsl_to_rgb(math.degrees(tile.angle), angle_saturation, angle_lightness)
+    else:
+        base_color = (74, 163, 255) if tile.reflected else (255, 213, 74)
     birth_progress = (birth_step - start_step) / max(end_step - start_step, 1)
     birth_time = step_to_time_progress(birth_progress, time_gamma) * duration
     age_seconds = max(0.0, current_time - birth_time)
@@ -237,8 +259,12 @@ def render_frame(
     pulse_alpha_amplitude: float,
     red_shift: float,
     red_decay_seconds: float,
+    color_mode: str,
+    angle_saturation: float,
+    angle_lightness: float,
+    background: tuple[int, int, int],
 ) -> None:
-    image = Image.new("RGBA", (width * supersample, height * supersample), (0, 0, 0, 255))
+    image = Image.new("RGBA", (width * supersample, height * supersample), (*background, 255))
     fill_layer = Image.new("RGBA", image.size, (0, 0, 0, 0))
     fill_draw = ImageDraw.Draw(fill_layer)
 
@@ -269,6 +295,9 @@ def render_frame(
             pulse_alpha_amplitude,
             red_shift,
             red_decay_seconds,
+            color_mode,
+            angle_saturation,
+            angle_lightness,
         )
         screen_points = [screen(point) for point in transform_points(base_points, tile)]
         fill_draw.polygon(screen_points, fill=(*color, alpha))
@@ -465,8 +494,9 @@ def collect_frame_states(
 def render_sequence(args: argparse.Namespace) -> None:
     input_dir = Path(args.input_dir)
     output_dir = Path(args.output_dir)
-    frame_dir = output_dir / "frames"
+    frame_dir = output_dir / args.frames_name
     cross_dir = output_dir / "removal_crosses"
+    background = parse_hex_color(args.background)
     state_files = parse_state_files(input_dir)
     missing = [step for step in range(args.start_step, args.end_step + 1) if step not in state_files]
     if missing:
@@ -494,17 +524,18 @@ def render_sequence(args: argparse.Namespace) -> None:
         return
 
     frame_dir.mkdir(parents=True, exist_ok=True)
-    cross_dir.mkdir(parents=True, exist_ok=True)
     for old_frame in frame_dir.glob("frame_*.png"):
         old_frame.unlink()
-    for old_cross in cross_dir.glob("frame_*.png"):
-        old_cross.unlink()
+    if not args.skip_removal_crosses:
+        cross_dir.mkdir(parents=True, exist_ok=True)
+        for old_cross in cross_dir.glob("frame_*.png"):
+            old_cross.unlink()
 
     frame_count = round(args.duration * args.fps)
     frame_times = sampled_frame_times(args.duration, frame_count)
     frame_steps = sampled_steps(args.start_step, args.end_step, frame_times, args.duration, args.time_gamma)
     frame_states = collect_frame_states(state_files, args.start_step, args.end_step, frame_steps, frame_times)
-    removal_events = collect_removal_events(
+    removal_events = [] if args.skip_removal_crosses else collect_removal_events(
         base_points,
         state_files,
         args.start_step,
@@ -543,46 +574,53 @@ def render_sequence(args: argparse.Namespace) -> None:
             args.pulse_alpha_amplitude,
             args.red_shift,
             args.red_decay_seconds,
+            args.color_mode,
+            args.angle_saturation,
+            args.angle_lightness,
+            background,
         )
-        render_removal_crosses(
-            removal_events,
-            camera,
-            cross_dir / f"frame_{frame_index}.png",
-            args.width,
-            args.height,
-            args.supersample,
-            frame_state.time,
-            tile_diameter,
-            args.cross_half_life,
-            args.cross_size_diameters,
-            args.cross_stroke_fraction,
-        )
+        if not args.skip_removal_crosses:
+            render_removal_crosses(
+                removal_events,
+                camera,
+                cross_dir / f"frame_{frame_index}.png",
+                args.width,
+                args.height,
+                args.supersample,
+                frame_state.time,
+                tile_diameter,
+                args.cross_half_life,
+                args.cross_size_diameters,
+                args.cross_stroke_fraction,
+            )
         if args.progress_every and (frame_index + 1) % args.progress_every == 0:
             print(f"rendered {frame_index + 1}/{frame_count} frames")
 
-    add_events, remove_events = collect_audio_events(
-        base_points,
-        state_files,
-        args.start_step,
-        args.end_step,
-        args.duration,
-        args.time_gamma,
-    )
-    save_audio_events(
-        output_dir / args.events_name,
-        add_events,
-        remove_events,
-        args.start_step,
-        args.end_step,
-        args.duration,
-        args.time_gamma,
-    )
+    if not args.skip_audio_events:
+        add_events, remove_events = collect_audio_events(
+            base_points,
+            state_files,
+            args.start_step,
+            args.end_step,
+            args.duration,
+            args.time_gamma,
+        )
+        save_audio_events(
+            output_dir / args.events_name,
+            add_events,
+            remove_events,
+            args.start_step,
+            args.end_step,
+            args.duration,
+            args.time_gamma,
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-dir", default="outputs/dfs_hat", help="directory containing state_*_tiles_*.h5 files")
     parser.add_argument("--output-dir", default="outputs/dfs_hat_animation", help="directory for frames and audio")
+    parser.add_argument("--frames-name", default="frames", help="subdirectory name for main PNG frames")
     parser.add_argument("--preset", choices=("hat", "tile11", "square"), default="hat")
     parser.add_argument("--start-step", type=int, default=0)
     parser.add_argument("--end-step", type=int, default=19800)
@@ -597,6 +635,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--initial-zoom-factor", type=float, default=1.0 / 3.0)
     parser.add_argument("--events-name", default="audio_events.h5")
     parser.add_argument("--events-only", action="store_true", help="write only the audio event HDF5 file and leave existing frames untouched")
+    parser.add_argument("--skip-removal-crosses", action="store_true", help="do not render the transparent removal-cross layer")
+    parser.add_argument("--skip-audio-events", action="store_true", help="do not write the audio event HDF5 file")
+    parser.add_argument("--background", default="#000000", help="main frame background color as #rrggbb")
+    parser.add_argument("--color-mode", choices=("handedness", "angle"), default="handedness")
+    parser.add_argument("--angle-saturation", type=float, default=0.58)
+    parser.add_argument("--angle-lightness", type=float, default=0.50)
     parser.add_argument("--fill-alpha", type=float, default=0.60)
     parser.add_argument("--noise-alpha-amplitude", type=float, default=0.08)
     parser.add_argument("--pulse-alpha-amplitude", type=float, default=0.035)

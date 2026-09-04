@@ -97,14 +97,28 @@ torus exact cover 可用来搜索周期铺法：把周期图按两个独立平�
 
 本项目的代码还可以将镶嵌探索算法的输出渲染为动画（图像序列）和音频。
 
-动画和音频渲染所需的输入是 `src/tiling_explorer.py --save-state-h5` 生成的一组逐步状态文件。渲染时先调用 `src/render_tiling_animation.py`，传入状态目录、输出目录和时间范围，例如 `python src/render_tiling_animation.py --input-dir <state-dir> --output-dir <animation-dir> --start-step <first> --end-step <last>`（尖括号及其内容是你要根据本地具体情况替换的，请勿原样使用）。脚本会输出主画面 PNG 序列到 `<animation-dir>/frames`，把消失块的红叉输出为透明背景 PNG 序列到 `<animation-dir>/removal_crosses`，并生成 `<animation-dir>/audio_events.h5` 作为音频事件缓存。
+动画和音频渲染所需的输入是 `src/tiling_explorer.py --save-state-h5` 生成的一组逐步状态文件。渲染时先调用 `src/render_tiling_animation.py`，传入状态目录、输出目录、预设形状和时间范围。脚本会输出主画面 PNG 序列到输出目录下的 `frames` 或 `--frames-name` 指定的子目录，把消失块的红叉输出为透明背景 PNG 序列到 `removal_crosses`，并生成 `audio_events.h5` 作为音频事件缓存。
 
-`src/render_tiling_animation.py` 包含若干参数。渲染时虚拟相机会根据当前已铺范围自适应地平移和缩放，可以用 `--camera-alpha` 控制过渡的快慢。主要时间和画面参数包括 `--duration`、`--fps`、`--width`、`--height`、`--time-gamma`、`--cross-half-life`；其中 `--time-gamma` 用来让搜索时间前慢后快。块使用半透明黄/蓝填充和同色实线边缘，新出现的块会短暂偏红，消失的块会在独立叉图层显示红色填充、黑色边线的叉。
+`src/render_tiling_animation.py` 的常用参数可以分成几类：
 
-调用示例：
+- `--input-dir` 指向探索程序导出的 HDF5 状态目录，`--output-dir` 指向动画输出目录，`--preset` 需要与探索时的形状一致，`--start-step` 和 `--end-step` 决定渲染哪一段搜索过程。
+- `--duration`、`--fps`、`--width`、`--height`、`--supersample` 控制总时长、帧率、分辨率和抗锯齿倍率。
+- `--time-gamma` 控制搜索步骤映射到视频时间的非线性程度，大于 1 时开头更慢、后面更快。
+- `--camera-fill`、`--camera-alpha`、`--initial-zoom-factor` 控制自适应相机的取景比例、平滑速度和初始缩放。
+- `--background`、`--color-mode`、`--fill-alpha`、`--noise-alpha-amplitude`、`--pulse-alpha-amplitude`、`--red-shift` 和 `--red-decay-seconds` 控制主画面样式。默认 `--color-mode handedness` 按手性使用黄/蓝两色，`--color-mode angle` 则按块的旋转角度取 HSL 色相，并用 `--angle-saturation` 和 `--angle-lightness` 指定饱和度和亮度。
+- `--cross-half-life`、`--cross-size-diameters` 和 `--cross-stroke-fraction` 控制消失块红叉图层。
+- `--skip-removal-crosses` 和 `--skip-audio-events` 用于只重渲染主画面，跳过红叉和音频事件缓存。
+
+默认风格调用示例：
 
 ```bash
 python src/render_tiling_animation.py --input-dir outputs/example-hat-search --output-dir outputs/example-hat-animation --start-step 0 --end-step 19800 --duration 60 --fps 30 --width 1920 --height 1080 --time-gamma 2.0
+```
+
+白色背景、按角度着色，并把主画面输出到单独子目录的调用示例：
+
+```bash
+python src/render_tiling_animation.py --input-dir outputs/example-tile11-search --output-dir outputs/example-tile11-animation --preset tile11 --start-step 0 --end-step 7600 --duration 60 --fps 30 --width 1920 --height 1080 --time-gamma 2.0 --background "#ffffff" --color-mode angle --angle-saturation 0.58 --angle-lightness 0.50 --frames-name frames_angle_tile11 --skip-removal-crosses --skip-audio-events
 ```
 
 有了 `src/render_tiling_animation.py` 导出的音频事件缓存文件，就可以调用 `src/bake_audio.py` 烘焙出音频，例如 `python src/bake_audio.py --events <animation-dir>/audio_events.h5 --output-dir <animation-dir>`。它会输出添加块和删除块两条 WAV 音轨；烘焙阶段会给事件加入可调的随机时间抖动和左右声道到达时间差以产生立体声效果。设计音频事件缓存文件的目的是在调整音色、抖动或声像参数时，不需要重新读取大量逐步状态文件（这通常很耗时）。
